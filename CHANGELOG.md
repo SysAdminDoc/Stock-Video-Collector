@@ -2,6 +2,12 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.7.6] - 2026-06-28
+
+- Added: Downloader writes to `.part` files, validates completed videos, and atomically promotes only verified media to final MP4 paths.
+- Added: Archive verification now flags invalid local video files, not just missing paths, and can reset missing/invalid records to pending.
+- Added: Download integrity tests for partial paths, quarantine handling, video validation, and finalization ordering.
+
 ## [v0.7.5] - 2026-06-28
 
 - Added: Reproducible release build script that cleans stale artifacts, verifies version sync, runs PyInstaller, and prints artifact hash metadata.

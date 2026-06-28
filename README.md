@@ -1,6 +1,6 @@
 # Stock Video Collector
 
-![Version](https://img.shields.io/badge/version-0.7.5-blue)
+![Version](https://img.shields.io/badge/version-0.7.6-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white)
 ![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?logo=qt&logoColor=white)
 ![Playwright](https://img.shields.io/badge/Playwright-Headless_Browser-2EAD33?logo=playwright&logoColor=white)
@@ -131,6 +131,7 @@ The crawler uses four complementary strategies to find video URLs on every page:
 | Concurrent downloads | Configurable parallel download workers (default: 2) |
 | ffmpeg HLS→MP4 | Automatic M3U8-to-MP4 conversion via ffmpeg |
 | Retry with backoff | Exponential backoff retry (configurable max attempts) |
+| Atomic writes & validation | Downloads write to `.part`, validate the video stream, then atomically promote to MP4 |
 | Speed & ETA tracking | Real-time download speed and estimated completion time |
 | Bandwidth limiting | Optional download speed cap |
 | Filename templates | Customizable output filenames: `{title}`, `{clip_id}`, `{creator}`, `{collection}`, `{resolution}` |
@@ -254,6 +255,8 @@ Available variables: `{title}`, `{clip_id}`, `{creator}`, `{collection}`, `{reso
 **Bot challenge / CAPTCHA detected** — Uncheck "Headless" mode and restart the crawl. The browser will open visibly so you can solve the challenge manually. The crawler pauses and resumes automatically once the challenge clears.
 
 **Downloads fail repeatedly** — Check that ffmpeg is installed and on your PATH. The scraper auto-detects ffmpeg in common locations, but if it can't find it, downloads that require HLS→MP4 conversion will fail.
+
+**Downloaded files show as invalid** — Archive verification validates local videos with `ffprobe` when available and falls back to an `ffmpeg` stream check. Invalid files are reset to pending from the Archive tab so they can be re-queued.
 
 **Clipboard monitor not working** — The clipboard monitor is opt-in. Enable it in your config by adding `"clipboard_monitor": true`, or toggle it programmatically. On Linux/Wayland, clipboard access may require additional permissions.
 

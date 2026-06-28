@@ -83,13 +83,6 @@ Roadmap for Stock Video Collector - a PyQt6 + Playwright desktop tool that crawl
 
 ## Research-Driven Additions
 
-- [ ] P0 - Atomic download writes with post-download validation
-  Why: `_download_one()` writes directly to the final MP4 path and only deletes zero-byte failures, which can leave corrupt files marked as usable.
-  Evidence: `artlist_scraper.py`, yt-dlp/gallery-dl archive and partial-download behavior.
-  Touches: `DownloadWorker._download_one`, `_write_sidecar`, `_extract_thumb`, archive verification UI, tests.
-  Acceptance: Downloads write to `.part`, atomically rename only after nonzero size plus `ffprobe` validation, and failed partials remain clearly resumable or quarantined.
-  Complexity: M
-
 - [ ] P0 - Replace destructive confirmation dialogs with backup-plus-undo flow
   Why: Database clearing is destructive and currently modal; the UI rule is immediate action with toast/status feedback and recovery.
   Evidence: `artlist_scraper.py` `_clear_db`, repository GUI rules.

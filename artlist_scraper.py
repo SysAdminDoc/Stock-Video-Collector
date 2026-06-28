@@ -79,7 +79,7 @@ import sys, os, subprocess, traceback, re, random, shutil
 
 APP_NAME = "Stock Video Collector"
 APP_PACKAGE_NAME = "Stock-Video-Collector"
-APP_VERSION = "0.7.5"
+APP_VERSION = "0.7.6"
 APP_WINDOW_TITLE = f"{APP_NAME}  v{APP_VERSION}"
 
 
@@ -6132,6 +6132,110 @@ def _get_ffmpeg():
     return _ffmpeg_cache
 
 
+def _get_ffprobe(ffmpeg_path=None):
+    """Return a usable ffprobe path when one is available."""
+    candidates = []
+    if ffmpeg_path and os.path.isfile(str(ffmpeg_path)):
+        base_dir = os.path.dirname(str(ffmpeg_path))
+        candidates.extend([
+            os.path.join(base_dir, 'ffprobe.exe'),
+            os.path.join(base_dir, 'ffprobe'),
+        ])
+    path_probe = shutil.which('ffprobe')
+    if path_probe:
+        candidates.append(path_probe)
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
+    return ''
+
+
+def _download_part_path(final_path):
+    """Return the transactional partial path used before atomic finalization."""
+    return f"{final_path}.part"
+
+
+def _quarantine_file(path):
+    """Move a suspect media file aside and return the quarantine path."""
+    if not path or not os.path.exists(path):
+        return ''
+    base, ext = os.path.splitext(path)
+    stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    candidate = f"{base}.invalid-{stamp}{ext or '.bin'}"
+    suffix = 1
+    while os.path.exists(candidate):
+        candidate = f"{base}.invalid-{stamp}-{suffix}{ext or '.bin'}"
+        suffix += 1
+    os.replace(path, candidate)
+    return candidate
+
+
+def _validate_video_file(video_path, ffmpeg_path=None, min_bytes=1):
+    """Validate that a completed media file is non-empty and has a readable video stream."""
+    if not video_path or not os.path.isfile(video_path):
+        return False, "file missing"
+    try:
+        size = os.path.getsize(video_path)
+    except OSError as e:
+        return False, f"size check failed: {e}"
+    if size < min_bytes:
+        return False, "file empty"
+
+    ffprobe = _get_ffprobe(ffmpeg_path)
+    if ffprobe:
+        cmd = [
+            ffprobe, '-v', 'error',
+            '-select_streams', 'v:0',
+            '-show_entries', 'stream=codec_type,width,height,duration:format=duration,size',
+            '-of', 'json',
+            video_path,
+        ]
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, encoding='utf-8',
+                errors='replace', timeout=45)
+        except subprocess.TimeoutExpired:
+            return False, "ffprobe timed out"
+        except FileNotFoundError:
+            ffprobe = ''
+        else:
+            if result.returncode != 0:
+                reason = (result.stderr or result.stdout or '').strip()
+                return False, f"ffprobe failed: {reason[:120] or result.returncode}"
+            try:
+                data = json.loads(result.stdout or '{}')
+            except Exception as e:
+                return False, f"ffprobe JSON failed: {e}"
+            streams = data.get('streams') or []
+            if any((s or {}).get('codec_type') == 'video' for s in streams):
+                return True, "ffprobe ok"
+            return False, "no video stream"
+
+    if ffmpeg_path:
+        cmd = [
+            ffmpeg_path, '-v', 'error',
+            '-i', video_path,
+            '-map', '0:v:0',
+            '-frames:v', '1',
+            '-f', 'null',
+            '-',
+        ]
+        try:
+            result = subprocess.run(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                text=True, encoding='utf-8', errors='replace', timeout=45)
+        except subprocess.TimeoutExpired:
+            return False, "ffmpeg validation timed out"
+        except FileNotFoundError:
+            return False, "ffprobe unavailable"
+        if result.returncode == 0:
+            return True, "ffmpeg validation ok"
+        reason = (result.stderr or '').strip()
+        return False, f"ffmpeg validation failed: {reason[:120] or result.returncode}"
+
+    return False, "ffprobe unavailable"
+
+
 def _apply_fn_template(template, clip, clip_id, ext='.mp4'):
     """Build filename from a user template with {title}, {clip_id}, {creator}, etc."""
     def _g(k): return str(clip.get(k, '') or '').strip()
@@ -6424,15 +6528,38 @@ class DownloadWorker(QThread):
         clip_data  = dict(zip(source.keys(), tuple(source))) if (hasattr(source,'keys') and not isinstance(source, dict)) else (source if isinstance(source, dict) else {})
         filename   = _apply_fn_template(fn_tpl, clip_data, clip_id)
         out_path   = os.path.join(self.out_dir, filename)
+        part_path  = _download_part_path(out_path)
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
-        # Check if output file already exists and is non-empty
-        if os.path.isfile(out_path) and os.path.getsize(out_path) > 1024:
-            self.log(f"[DL] SKIP id:{clip_id} — file already exists: {filename}", "INFO")
-            self.db.update_local_path(clip_id, out_path, 'done')
-            self.progress_signal.emit(clip_id, 100, "File exists")
-            self.clip_done.emit(clip_id, True, out_path)
-            return 'ok'
+        # Check if output file already exists and is readable before trusting it.
+        if os.path.isfile(out_path):
+            if os.path.getsize(out_path) > 0:
+                valid, reason = _validate_video_file(out_path, ffmpeg)
+                if valid:
+                    self.log(f"[DL] SKIP id:{clip_id} — file already exists: {filename}", "INFO")
+                    self.db.update_local_path(clip_id, out_path, 'done')
+                    self.progress_signal.emit(clip_id, 100, "File exists")
+                    self.clip_done.emit(clip_id, True, out_path)
+                    return 'ok'
+                try:
+                    quarantined = _quarantine_file(out_path)
+                    self.log(f"[DL] Existing file invalid id:{clip_id} ({reason}); quarantined: {quarantined}", "WARN")
+                except Exception as e:
+                    self.log(f"[DL] Existing file invalid id:{clip_id} ({reason}); quarantine failed: {e}", "ERROR")
+                    return 'transient'
+            else:
+                try:
+                    os.remove(out_path)
+                except Exception:
+                    pass
+
+        if os.path.isfile(part_path) and os.path.getsize(part_path) == 0:
+            try:
+                os.remove(part_path)
+            except Exception:
+                pass
+        elif os.path.isfile(part_path):
+            self.log(f"[DL] Found previous partial id:{clip_id}: {os.path.basename(part_path)}", "INFO")
 
         # Disk space check — require at least 500 MB free before starting a download
         try:
@@ -6480,7 +6607,8 @@ class DownloadWorker(QThread):
                 '-c:v', 'copy',
                 '-an',
                 '-movflags', '+faststart',
-                out_path
+                '-f', 'mp4',
+                part_path
             ]
 
             proc = subprocess.Popen(
@@ -6534,9 +6662,9 @@ class DownloadWorker(QThread):
                         else:
                             eta_str = f"{eta_secs/60:.1f}m left"
                         # Estimate speed from file size if available
-                        if os.path.exists(out_path):
+                        if os.path.exists(part_path):
                             if now - last_speed_update >= 1.0:
-                                fsize = os.path.getsize(out_path)
+                                fsize = os.path.getsize(part_path)
                                 speed_bps = fsize / wall_elapsed if wall_elapsed > 0 else 0
                                 if speed_bps > 1_000_000:
                                     speed_str = f"{speed_bps/1_000_000:.1f} MB/s"
@@ -6552,6 +6680,11 @@ class DownloadWorker(QThread):
 
             proc.wait(timeout=30)
             rc = proc.returncode
+            try:
+                if proc.stderr:
+                    proc.stderr.close()
+            except Exception:
+                pass
 
             with self._procs_lock:
                 self._procs.pop(clip_id, None)
@@ -6559,7 +6692,19 @@ class DownloadWorker(QThread):
             if self._stop.is_set():
                 return 'transient'
 
-            if rc == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            if rc == 0 and os.path.exists(part_path) and os.path.getsize(part_path) > 0:
+                valid, reason = _validate_video_file(part_path, ffmpeg)
+                if not valid:
+                    try:
+                        quarantined = _quarantine_file(part_path)
+                        self.log(f"[DL] Validation failed [{clip_id}]: {reason}; quarantined: {quarantined}", "ERROR")
+                    except Exception as e:
+                        self.log(f"[DL] Validation failed [{clip_id}]: {reason}; quarantine failed: {e}", "ERROR")
+                    self.progress_signal.emit(clip_id, 0, f"Validation failed: {reason[:50]}")
+                    return 'transient'
+
+                os.replace(part_path, out_path)
+
                 # Report final size + speed
                 fsize = os.path.getsize(out_path)
                 wall_total = _time.time() - dl_start_time
@@ -6586,10 +6731,13 @@ class DownloadWorker(QThread):
                 self.clip_done.emit(clip_id, True, out_path)
                 return 'ok'
             else:
-                # Clean up partial file
+                # Keep non-empty partials for inspection/retry, remove empty placeholders.
                 try:
-                    if os.path.exists(out_path) and os.path.getsize(out_path) == 0:
-                        os.remove(out_path)
+                    if os.path.exists(part_path):
+                        if os.path.getsize(part_path) == 0:
+                            os.remove(part_path)
+                        else:
+                            self.log(f"[DL] Kept partial for retry [{clip_id}]: {part_path}", "WARN")
                 except Exception:
                     pass
                 err = f"ffmpeg exit {rc}"
@@ -6601,6 +6749,11 @@ class DownloadWorker(QThread):
             # proc.wait(timeout=30) expired — kill it
             try: proc.kill()
             except Exception: pass
+            try:
+                if proc.stderr:
+                    proc.stderr.close()
+            except Exception:
+                pass
             with self._procs_lock:
                 self._procs.pop(clip_id, None)
             self.log(f"[DL] TIMEOUT: ffmpeg hung for [{clip_id}], killed", "ERROR")
@@ -6608,6 +6761,11 @@ class DownloadWorker(QThread):
             return 'transient'
 
         except Exception as e:
+            try:
+                if 'proc' in locals() and proc.stderr:
+                    proc.stderr.close()
+            except Exception:
+                pass
             with self._procs_lock:
                 self._procs.pop(clip_id, None)
             err = str(e)
@@ -8237,16 +8395,16 @@ class MainWindow(QMainWindow):
         lay.addWidget(grp_stats)
 
         # Verify
-        grp_verify = QGroupBox("Verify Archive  (check local files exist on disk)")
+        grp_verify = QGroupBox("Verify Archive  (validate local files on disk)")
         gv = QVBoxLayout(grp_verify)
-        gv.addWidget(self._sub("Scans every downloaded clip's recorded path. Flags missing files."))
+        gv.addWidget(self._sub("Scans every downloaded clip's recorded path and validates the video stream."))
         vbtn = QPushButton("Verify Archive Integrity"); vbtn.setObjectName("warning"); vbtn.setFixedHeight(Z(38)); vbtn.setMinimumWidth(Z(200))
         vbtn.clicked.connect(self._verify_archive); gv.addWidget(vbtn)
         self.lbl_verify_result = QLabel(""); self.lbl_verify_result.setWordWrap(True)
         self.lbl_verify_result.setStyleSheet(f"color:{C('warning')};"); gv.addWidget(self.lbl_verify_result)
-        rbtn = QPushButton("Reset Missing to Pending"); rbtn.setObjectName("danger"); rbtn.setFixedHeight(Z(34)); rbtn.setMinimumWidth(Z(180))
+        rbtn = QPushButton("Reset Missing/Invalid to Pending"); rbtn.setObjectName("danger"); rbtn.setFixedHeight(Z(34)); rbtn.setMinimumWidth(Z(220))
         rbtn.clicked.connect(self._reset_missing); gv.addWidget(rbtn)
-        gv.addWidget(self._sub("Clears local_path + dl_status for missing files so they re-queue for download."))
+        gv.addWidget(self._sub("Clears local_path + dl_status for missing or invalid files so they re-queue for download."))
         lay.addWidget(grp_verify)
 
         # Scan folder
@@ -8345,28 +8503,49 @@ class MainWindow(QMainWindow):
     def _verify_archive(self):
         try:
             rows = self.db.execute("SELECT clip_id, local_path FROM clips WHERE local_path!='' AND dl_status='done'").fetchall()
-            missing = [r['clip_id'] for r in rows if not os.path.isfile(r['local_path'] or '')]
+            ffmpeg = _get_ffmpeg()
+            missing = []
+            invalid = []
+            for r in rows:
+                path = r['local_path'] or ''
+                if not os.path.isfile(path):
+                    missing.append(r['clip_id'])
+                    continue
+                valid, reason = _validate_video_file(path, ffmpeg)
+                if not valid:
+                    invalid.append((r['clip_id'], reason))
             total = len(rows)
-            if not missing:
+            if not missing and not invalid:
                 self.lbl_verify_result.setStyleSheet(f"color:{C('success')};")
-                self.lbl_verify_result.setText(f"All {total} downloaded files verified OK.")
+                self.lbl_verify_result.setText(f"All {total} downloaded files validated OK.")
             else:
                 self.lbl_verify_result.setStyleSheet(f"color:{C('error')};")
+                parts = []
+                if missing:
+                    parts.append(f"{len(missing)} missing: "+", ".join(missing[:8])+("..." if len(missing)>8 else ""))
+                if invalid:
+                    invalid_ids = [cid for cid, _reason in invalid]
+                    parts.append(f"{len(invalid)} invalid: "+", ".join(invalid_ids[:8])+("..." if len(invalid_ids)>8 else ""))
                 self.lbl_verify_result.setText(
-                    f"{len(missing)} of {total} files missing: "+", ".join(missing[:8])+("..." if len(missing)>8 else ""))
+                    f"{len(missing) + len(invalid)} of {total} files need attention. " + " | ".join(parts))
         except Exception as e: self.lbl_verify_result.setText(f"Error: {e}")
 
     def _reset_missing(self):
         try:
             rows = self.db.execute("SELECT clip_id, local_path FROM clips WHERE local_path!='' AND dl_status='done'").fetchall()
+            ffmpeg = _get_ffmpeg()
             count = 0
             for r in rows:
-                if not os.path.isfile(r['local_path'] or ''):
+                path = r['local_path'] or ''
+                valid = False
+                if os.path.isfile(path):
+                    valid, _reason = _validate_video_file(path, ffmpeg)
+                if not valid:
                     self.db.execute("UPDATE clips SET local_path='', dl_status='' WHERE clip_id=?", (r['clip_id'],))
                     count += 1
             self.db.commit()
             self.lbl_verify_result.setStyleSheet(f"color:{C('warning')};")
-            self.lbl_verify_result.setText(f"Reset {count} missing file records to pending.")
+            self.lbl_verify_result.setText(f"Reset {count} missing/invalid file records to pending.")
             self._do_search()
         except Exception as e: self.lbl_verify_result.setText(f"Error: {e}")
 
