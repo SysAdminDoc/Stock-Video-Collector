@@ -2,6 +2,11 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.7.7] - 2026-06-28
+
+- Added: Clear DB now creates a timestamped SQLite backup, clears immediately without a confirmation dialog, and exposes Restore Last Backup in-app.
+- Added: Database backup/restore helpers using SQLite's online backup API, plus round-trip tests for clips and crawl queue restoration.
+
 ## [v0.7.6] - 2026-06-28
 
 - Added: Downloader writes to `.part` files, validates completed videos, and atomically promotes only verified media to final MP4 paths.

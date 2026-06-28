@@ -79,7 +79,7 @@ import sys, os, subprocess, traceback, re, random, shutil
 
 APP_NAME = "Stock Video Collector"
 APP_PACKAGE_NAME = "Stock-Video-Collector"
-APP_VERSION = "0.7.6"
+APP_VERSION = "0.7.7"
 APP_WINDOW_TITLE = f"{APP_NAME}  v{APP_VERSION}"
 
 
@@ -811,6 +811,38 @@ class DB:
             self.conn.commit()
 
     # ── Queue ──────────────────────────────────────────────────────────────
+
+    def backup_to(self, backup_path):
+        """Create a consistent SQLite backup of the current open database."""
+        backup_dir = os.path.dirname(os.path.abspath(backup_path))
+        os.makedirs(backup_dir, exist_ok=True)
+        with self._lock:
+            self.conn.commit()
+            try:
+                self.conn.execute("PRAGMA wal_checkpoint(FULL)")
+            except Exception:
+                pass
+            dest = sqlite3.connect(backup_path)
+            try:
+                self.conn.backup(dest)
+                dest.commit()
+            finally:
+                dest.close()
+        return backup_path
+
+    def restore_from(self, backup_path):
+        """Restore this open database connection from a SQLite backup file."""
+        if not backup_path or not os.path.isfile(backup_path):
+            raise FileNotFoundError(backup_path or "backup path is empty")
+        source = sqlite3.connect(backup_path)
+        try:
+            with self._lock:
+                self.conn.commit()
+                source.backup(self.conn)
+                self.conn.commit()
+        finally:
+            source.close()
+        self._init()
 
     def enqueue(self, url, depth=0, priority=0, profile=''):
         try:
@@ -6883,6 +6915,7 @@ class MainWindow(QMainWindow):
         self.worker          = None
         self._dl_worker      = None   # DownloadWorker instance
         self._db_path        = os.path.join(get_config_dir(), 'artlist_results.db')
+        self._latest_db_backup_path = self._find_latest_db_backup()
 
         self.setWindowTitle(APP_WINDOW_TITLE)
         self.setMinimumSize(Z(960), Z(600))
@@ -7408,6 +7441,12 @@ class MainWindow(QMainWindow):
         self.btn_stop.setEnabled(False); self.btn_stop.clicked.connect(self._stop_crawl)
 
         clrdb  = QPushButton("🗑  Clear DB");   clrdb.setObjectName("neutral");  clrdb.setFixedHeight(Z(40));  clrdb.clicked.connect(self._clear_db)
+        self.btn_restore_db = QPushButton("Restore Last Backup")
+        self.btn_restore_db.setObjectName("warning")
+        self.btn_restore_db.setFixedHeight(Z(40))
+        self.btn_restore_db.setMinimumWidth(Z(160))
+        self.btn_restore_db.clicked.connect(self._restore_latest_db_backup)
+        self._sync_restore_db_button()
         rebuild_fts = QPushButton("🔄  Rebuild Index"); rebuild_fts.setObjectName("neutral"); rebuild_fts.setFixedHeight(Z(40)); rebuild_fts.setToolTip("Rebuild full-text search index if search results seem wrong"); rebuild_fts.clicked.connect(self._rebuild_fts)
         clrlog = QPushButton("Clear Log"); clrlog.setObjectName("neutral"); clrlog.setFixedHeight(Z(40)); clrlog.clicked.connect(lambda: self.log_view.clear())
         self.chk_verbose_log = QCheckBox("Verbose")
@@ -7416,7 +7455,7 @@ class MainWindow(QMainWindow):
         self.chk_verbose_log.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(11)}px;")
 
         for b in (self.btn_start, self.btn_pause, self.btn_stop): btns.addWidget(b)
-        btns.addStretch(); btns.addWidget(self.chk_verbose_log); btns.addWidget(rebuild_fts); btns.addWidget(clrdb); btns.addWidget(clrlog)
+        btns.addStretch(); btns.addWidget(self.chk_verbose_log); btns.addWidget(rebuild_fts); btns.addWidget(self.btn_restore_db); btns.addWidget(clrdb); btns.addWidget(clrlog)
         lay.addLayout(btns)
 
         log_lbl = QLabel("Live Log"); log_lbl.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(11)}px; font-weight:600;")
@@ -9909,13 +9948,88 @@ class MainWindow(QMainWindow):
         d = QFileDialog.getExistingDirectory(self,"Select Output Dir",self.inp_output.text())
         if d: self.inp_output.setText(d)
 
+    def _db_backup_dir(self):
+        return os.path.join(get_config_dir(), 'backups')
+
+    def _make_db_backup_path(self):
+        backup_dir = self._db_backup_dir()
+        stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+        path = os.path.join(backup_dir, f"stock-video-collector-{stamp}.db")
+        suffix = 1
+        while os.path.exists(path):
+            path = os.path.join(backup_dir, f"stock-video-collector-{stamp}-{suffix}.db")
+            suffix += 1
+        return path
+
+    def _find_latest_db_backup(self):
+        backup_dir = self._db_backup_dir()
+        if not os.path.isdir(backup_dir):
+            return ''
+        candidates = [
+            os.path.join(backup_dir, name)
+            for name in os.listdir(backup_dir)
+            if name.lower().endswith('.db')
+        ]
+        if not candidates:
+            return ''
+        return max(candidates, key=lambda p: os.path.getmtime(p))
+
+    def _sync_restore_db_button(self):
+        if not self._latest_db_backup_path or not os.path.isfile(self._latest_db_backup_path):
+            self._latest_db_backup_path = self._find_latest_db_backup()
+        enabled = bool(self._latest_db_backup_path and os.path.isfile(self._latest_db_backup_path))
+        if hasattr(self, 'btn_restore_db'):
+            self.btn_restore_db.setEnabled(enabled)
+            tip = self._latest_db_backup_path if enabled else "No database backup has been created yet."
+            self.btn_restore_db.setToolTip(tip)
+
+    def _refresh_after_database_change(self):
+        self._do_search()
+        self._update_stats()
+        self._refresh_filter_dropdowns()
+        self._refresh_collections_combo()
+        self._refresh_saved_searches()
+        self._update_dl_stats()
+
     def _clear_db(self):
-        if QMessageBox.question(self,"Clear Database",
-                "Delete ALL clips, metadata, M3U8 links and crawl history?",
-                QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No
-            ) == QMessageBox.StandardButton.Yes:
-            self.db.clear_all(); self._do_search(); self._update_stats()
-            self.log_view.clear(); self.status_bar.showMessage("Database cleared.")
+        try:
+            backup_path = self._make_db_backup_path()
+            self.db.backup_to(backup_path)
+            self.db.clear_all()
+            self._latest_db_backup_path = backup_path
+            self._sync_restore_db_button()
+            self._refresh_after_database_change()
+            msg = f"Database cleared. Backup saved: {backup_path}"
+            self._on_log(msg, 'WARN')
+            self.status_bar.showMessage("Database cleared. Restore Last Backup is available.", 6000)
+            self._toast("Database cleared. Restore Last Backup is available.", 'warning', 5000)
+        except Exception as e:
+            msg = f"Database clear failed: {e}"
+            self._on_log(msg, 'ERROR')
+            self.status_bar.showMessage(msg, 6000)
+            self._toast("Database clear failed -- check log", 'error', 5000)
+
+    def _restore_latest_db_backup(self):
+        self._sync_restore_db_button()
+        backup_path = self._latest_db_backup_path
+        if not backup_path:
+            self.status_bar.showMessage("No database backup is available.", 4000)
+            self._toast("No database backup is available.", 'warning', 3000)
+            return
+        try:
+            self.db.restore_from(backup_path)
+            self._latest_db_backup_path = backup_path
+            self._sync_restore_db_button()
+            self._refresh_after_database_change()
+            msg = f"Database restored from backup: {backup_path}"
+            self._on_log(msg, 'OK')
+            self.status_bar.showMessage("Database restored from latest backup.", 6000)
+            self._toast("Database restored from latest backup.", 'success', 4000)
+        except Exception as e:
+            msg = f"Database restore failed: {e}"
+            self._on_log(msg, 'ERROR')
+            self.status_bar.showMessage(msg, 6000)
+            self._toast("Database restore failed -- check log", 'error', 5000)
 
     def _rebuild_fts(self):
         """Rebuild the full-text search index if search results seem out of sync."""

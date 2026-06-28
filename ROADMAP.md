@@ -83,13 +83,6 @@ Roadmap for Stock Video Collector - a PyQt6 + Playwright desktop tool that crawl
 
 ## Research-Driven Additions
 
-- [ ] P0 - Replace destructive confirmation dialogs with backup-plus-undo flow
-  Why: Database clearing is destructive and currently modal; the UI rule is immediate action with toast/status feedback and recovery.
-  Evidence: `artlist_scraper.py` `_clear_db`, repository GUI rules.
-  Touches: `DB.clear_all`, `MainWindow._clear_db`, config/output backup helpers, toast/log/status paths.
-  Acceptance: Clear database creates a timestamped SQLite backup, runs immediately, shows toast/status/log feedback, and offers an in-app restore action for the latest backup.
-  Complexity: M
-
 - [ ] P0 - Add credential vault and redacted diagnostics
   Why: API keys, proxy credentials, and session-related settings should not live in plaintext JSON or leak into logs as official API modes expand.
   Evidence: `load_config`/`save_config` in `artlist_scraper.py`, Pexels/Pixabay/Vimeo/Adobe Stock API docs.
