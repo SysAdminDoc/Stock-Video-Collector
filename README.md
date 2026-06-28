@@ -1,6 +1,6 @@
 # Stock Video Collector
 
-![Version](https://img.shields.io/badge/version-0.7.4-blue)
+![Version](https://img.shields.io/badge/version-0.7.5-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white)
 ![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?logo=qt&logoColor=white)
 ![Playwright](https://img.shields.io/badge/Playwright-Headless_Browser-2EAD33?logo=playwright&logoColor=white)
@@ -35,7 +35,7 @@ The setup installs:
 
 ```bash
 .\.venv\Scripts\python -m pip install pyinstaller
-.\.venv\Scripts\python -m PyInstaller --onefile --windowed --name Stock-Video-Collector --icon icon.ico --add-data "icon.png;." --runtime-hook build_hooks/runtime_hook_mp.py artlist_scraper.py
+.\.venv\Scripts\python tools\build_release.py
 ```
 
 ---

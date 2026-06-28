@@ -83,13 +83,6 @@ Roadmap for Stock Video Collector - a PyQt6 + Playwright desktop tool that crawl
 
 ## Research-Driven Additions
 
-- [ ] P0 - Normalize release/version state and reproducible artifact builds
-  Why: The source header lists internal notes through v1.1.0 while README/window title say v0.7.4, and `dist/` is not tied to a repeatable release flow.
-  Evidence: `artlist_scraper.py`, `README.md`, PyInstaller build notes, Eagle/JDownloader/4K Download public release patterns.
-  Touches: `artlist_scraper.py`, `README.md`, changelog/release notes, build script/spec, release artifact cleanup.
-  Acceptance: One version constant drives UI/docs/badges/changelog; clean build deletes stale artifacts and produces a fresh installable desktop artifact.
-  Complexity: M
-
 - [ ] P0 - Atomic download writes with post-download validation
   Why: `_download_one()` writes directly to the final MP4 path and only deletes zero-byte failures, which can leave corrupt files marked as usable.
   Evidence: `artlist_scraper.py`, yt-dlp/gallery-dl archive and partial-download behavior.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Stock Video Collector v0.7.4
+# Stock Video Collector
 # Headless crawler with PyQt6 GUI — full metadata + keyword search + download manager
 # Phase 1-3: Search quality, thumbnail pipeline, card/grid view
 # Phase 4-6: Detail panel, archive management, collections, stats, filename templates
@@ -71,11 +71,16 @@
 #          All remaining hardcoded px values now use Z() scaling.
 
 import multiprocessing
-from pathlib import Path
 
 multiprocessing.freeze_support()
 
+from pathlib import Path
 import sys, os, subprocess, traceback, re, random, shutil
+
+APP_NAME = "Stock Video Collector"
+APP_PACKAGE_NAME = "Stock-Video-Collector"
+APP_VERSION = "0.7.5"
+APP_WINDOW_TITLE = f"{APP_NAME}  v{APP_VERSION}"
 
 
 def _branding_icon_path() -> Path:
@@ -119,7 +124,7 @@ def _crash_handler(exc_type, exc_value, exc_tb):
     try:
         import ctypes
         ctypes.windll.user32.MessageBoxW(
-            0, f"Fatal error:\n{crash_file}\n\n{msg[:800]}", "Video Scraper — Fatal Error", 0x10)
+            0, f"Fatal error:\n{crash_file}\n\n{msg[:800]}", f"{APP_NAME} - Fatal Error", 0x10)
     except Exception: pass
     sys.exit(1)
 
@@ -6721,7 +6726,7 @@ class MainWindow(QMainWindow):
         self._dl_worker      = None   # DownloadWorker instance
         self._db_path        = os.path.join(get_config_dir(), 'artlist_results.db')
 
-        self.setWindowTitle("Video Scraper  v0.7.4")
+        self.setWindowTitle(APP_WINDOW_TITLE)
         self.setMinimumSize(Z(960), Z(600))
         self.resize(Z(1400), Z(860))
 
@@ -6853,7 +6858,7 @@ class MainWindow(QMainWindow):
                 self.isMinimized() and self._tray and self._tray.isVisible()):
             QTimer.singleShot(0, self.hide)
             self._tray.showMessage(
-                "Video Scraper", "Running in background. Double-click tray to restore.",
+                APP_NAME, "Running in background. Double-click tray to restore.",
                 QSystemTrayIcon.MessageIcon.Information, 2000)
 
     # ── Toast Notifications ─────────────────────────────────────────────────
@@ -9772,7 +9777,7 @@ class MainWindow(QMainWindow):
             event.ignore()
             self.hide()
             self._tray.showMessage(
-                "Video Scraper", "Still running in background.",
+                APP_NAME, "Still running in background.",
                 QSystemTrayIcon.MessageIcon.Information, 2000)
             return
         # Stop timers FIRST so they can't fire against a closed DB
@@ -9838,7 +9843,7 @@ if __name__ == '__main__':
     ]
 
     app.setStyleSheet(_build_stylesheet(_startup_zoom, _startup_theme))
-    app.setApplicationName("Video Scraper")
+    app.setApplicationName(APP_NAME)
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
