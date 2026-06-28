@@ -77,5 +77,41 @@ class VimeoProfileTests(unittest.TestCase):
         self.assertIn("source_url", extractor_js)
 
 
+class AdobeStockProfileTests(unittest.TestCase):
+    def test_adobe_stock_profile_covers_asset_pages(self):
+        profile = _profile_constructor("Adobe Stock")
+
+        self.assertEqual(_kw(profile, "start_url"), "https://stock.adobe.com/video")
+        self.assertEqual(
+            _kw(profile, "video_types"),
+            ["mp4", "webm", "m3u8", "mpd"],
+        )
+        self.assertIn("stock.adobe.com", _kw(profile, "domains"))
+
+        item_re = re.compile(_kw(profile, "item_url_regex"))
+        self.assertRegex(
+            "https://stock.adobe.com/video/sample-stock-clip/123456789",
+            item_re,
+        )
+        self.assertRegex(
+            "https://stock.adobe.com/fr/video/sample-stock-clip/123456789",
+            item_re,
+        )
+        self.assertRegex(
+            "https://stock.adobe.com/search/video?k=office&asset_id=123456789",
+            item_re,
+        )
+        self.assertIsNone(item_re.search("https://stock.adobe.com/photos/sample/123456789"))
+
+    def test_adobe_catalog_extractor_records_watermarked_preview_metadata(self):
+        profile = _profile_constructor("Adobe Stock")
+        extractor_js = _kw(profile, "catalog_card_js")
+
+        self.assertIn(r"stock\.adobe\.com", extractor_js)
+        self.assertIn("asset_id", extractor_js)
+        self.assertIn("Watermarked preview", extractor_js)
+        self.assertIn("source_url", extractor_js)
+
+
 if __name__ == "__main__":
     unittest.main()
