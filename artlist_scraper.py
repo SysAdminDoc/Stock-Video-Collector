@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Video Scraper v1.4.0
+# Stock Video Collector v0.7.2
 # Headless crawler with PyQt6 GUI — full metadata + keyword search + download manager
 # Phase 1-3: Search quality, thumbnail pipeline, card/grid view
 # Phase 4-6: Detail panel, archive management, collections, stats, filename templates
@@ -10,7 +10,6 @@
 #          parsing, URL slug titles, Load More pagination, CDN domain filter),
 #          BackgroundWorker for non-blocking exports, search debouncing,
 #          auto-metadata from video filenames (resolution/fps/clip_id),
-from pathlib import Path
 #          generic h1 skip patterns, video element DOM observer
 # v0.6.0: Multi-site support with Site Profile system (Artlist, Pexels, Pixabay,
 #          Storyblocks, Generic), expanded video detection (M3U8, MP4, WebM, DASH,
@@ -71,10 +70,14 @@ from pathlib import Path
 #          Open Config / DB / Output directory buttons in Archive tab.
 #          All remaining hardcoded px values now use Z() scaling.
 
+import multiprocessing
+from pathlib import Path
+
+multiprocessing.freeze_support()
+
 import sys, os, subprocess, traceback, re, random, shutil
 
 
-# codex-branding:start
 def _branding_icon_path() -> Path:
     candidates = []
     if getattr(sys, "frozen", False):
@@ -89,7 +92,6 @@ def _branding_icon_path() -> Path:
         if candidate.exists():
             return candidate
     return Path("icon.png")
-# codex-branding:end
 
 
 # Hide console window on Windows immediately (before any prints)
@@ -97,7 +99,6 @@ if sys.platform == 'win32':
     try:
         import ctypes as _ct
         _hw = _ct.windll.kernel32.GetConsoleWindow()
-        _hw.setWindowIcon(branding_icon)
         if _hw:
             _ct.windll.user32.ShowWindow(_hw, 0)  # SW_HIDE
         del _ct, _hw
@@ -128,8 +129,23 @@ sys.excepthook = _crash_handler
 # AUTO-BOOTSTRAP
 # ─────────────────────────────────────────────────────────────────────────────
 
+REQUIRED_PACKAGES = (
+    ('PyQt6', 'PyQt6'),
+    ('playwright', 'playwright'),
+    ('imageio-ffmpeg', 'imageio_ffmpeg'),
+)
+
+
+def _is_frozen():
+    return getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS")
+
+
 def _install_chromium(verbose=True):
     """Install Playwright's Chromium browser. Returns True on success."""
+    if _is_frozen():
+        if verbose:
+            print("[Setup] Browser install is unavailable from the packaged EXE.")
+        return False
     if verbose: print("[Setup] Installing Playwright Chromium browser...")
     # Try normal install first, then with --with-deps (Linux), then without
     for extra in [[], ['--with-deps']]:
@@ -157,37 +173,29 @@ def _chromium_is_ready():
 
 
 def _bootstrap():
-    if sys.version_info < (3, 8):
-        print("Python 3.8+ required"); sys.exit(1)
+    if sys.version_info < (3, 9):
+        print("Python 3.9+ required"); sys.exit(1)
 
-    try:
-        import pip
-    except ImportError:
-        subprocess.check_call([sys.executable, '-m', 'ensurepip', '--default-pip'])
+    if _is_frozen():
+        return
 
-    # Install Python packages
-    for pkg in ['PyQt6', 'playwright', 'imageio-ffmpeg']:
-        import_name = pkg.replace('-', '_').lower()
+    missing = []
+    for pkg, import_name in REQUIRED_PACKAGES:
         try:
             __import__(import_name)
         except ImportError:
-            print(f"[Setup] Installing {pkg}...")
-            installed = False
-            for flags in [[], ['--user'], ['--break-system-packages']]:
-                try:
-                    subprocess.check_call(
-                        [sys.executable, '-m', 'pip', 'install', pkg, '-q'] + flags,
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    installed = True
-                    break
-                except subprocess.CalledProcessError: continue
-            if not installed:
-                print(f"[Setup] WARNING: could not install {pkg}")
+            missing.append(pkg)
+
+    if missing:
+        print("[Setup] Missing Python packages: " + ", ".join(missing))
+        print("[Setup] Run: python -m pip install -r requirements.txt")
+        sys.exit(1)
 
     # Install Chromium browser if missing
     if not _chromium_is_ready():
-        _install_chromium(verbose=True)
-        # Don't abort if it fails — the GUI will show a clear error + install button
+        print("[Setup] Playwright Chromium is missing.")
+        print("[Setup] Run: python -m playwright install chromium")
+        # Do not abort; the GUI will show a clear error and install button in source runs.
 
     print("[Setup] Ready.\n")
 
@@ -216,7 +224,7 @@ from PyQt6.QtCore import (
     Qt, QThread, pyqtSignal, QTimer, QSize, QRect, QPoint, QUrl,
     QPropertyAnimation, QEasingCurve
 )
-from PyQt6.QtGui import (, QIcon
+from PyQt6.QtGui import (
     QColor, QTextCursor, QPixmap, QPainter, QBrush, QFont,
     QKeySequence, QShortcut, QAction, QIcon
 )
@@ -1878,6 +1886,95 @@ SiteProfile.register(SiteProfile(
 ))
 
 SiteProfile.register(SiteProfile(
+    'Vimeo',
+    description='Vimeo public stock/CC channels -- HLS and progressive MP4 previews',
+    domains=['vimeo.com', 'www.vimeo.com', 'player.vimeo.com'],
+    start_url='https://vimeo.com/channels/freestockfootage',
+    catalog_patterns=['/channels/', '/groups/', '/showcase/', '/album/', '/categories/'],
+    item_patterns=['/video/', '/videos/'],
+    exclude_patterns=[
+        '/features', '/solutions', '/upgrade', '/pricing', '/enterprise',
+        '/business', '/ott', '/livestream', '/blog', '/help', '/settings',
+        '/manage/', '/upload', '/login', '/join',
+    ],
+    item_url_regex=(
+        r'(?:vimeo\.com/(?:channels/[^/]+/|groups/[^/]+/videos/|'
+        r'showcase/\d+/video/|album/\d+/video/)?\d{6,}|'
+        r'player\.vimeo\.com/video/\d{6,})'
+    ),
+    video_types=['m3u8', 'mp4', 'webm', 'mpd'],
+    scroll_items=True,
+    og_fallback=True,
+    jsonld_fallback=True,
+    catalog_card_js="""
+    (() => {
+        const clips = [];
+        const seen = new Set();
+        const idFromHref = (href) => {
+            if (!href) return '';
+            const patterns = [
+                /vimeo\\.com\\/(?:channels\\/[^/]+\\/|groups\\/[^/]+\\/videos\\/|showcase\\/\\d+\\/video\\/|album\\/\\d+\\/video\\/)?(\\d{6,})(?:[/?#]|$)/i,
+                /player\\.vimeo\\.com\\/video\\/(\\d{6,})(?:[/?#]|$)/i,
+                /\\/(?:channels\\/[^/]+\\/|groups\\/[^/]+\\/videos\\/|showcase\\/\\d+\\/video\\/|album\\/\\d+\\/video\\/)?(\\d{6,})(?:[/?#]|$)/i
+            ];
+            for (const pat of patterns) {
+                const m = href.match(pat);
+                if (m) return m[1];
+            }
+            return '';
+        };
+        const bestImage = (root) => {
+            const img = root.querySelector('img[src], img[data-src], img[srcset], video[poster]');
+            if (!img) return '';
+            if (img.poster) return img.poster;
+            if (img.src) return img.src;
+            if (img.dataset && img.dataset.src) return img.dataset.src;
+            if (img.srcset) {
+                const parts = img.srcset.split(',').map(s => s.trim().split(' ')[0]).filter(Boolean);
+                return parts[parts.length - 1] || '';
+            }
+            return '';
+        };
+        document.querySelectorAll('a[href]').forEach(a => {
+            const href = a.href || a.getAttribute('href') || '';
+            const id = idFromHref(href);
+            if (!id || seen.has(id)) return;
+            const root = a.closest('article, li, [data-testid], [class*="clip"], [class*="video"], [class*="card"]') || a;
+            const thumb = bestImage(root);
+            if (!thumb && !(root.innerText || '').trim()) return;
+            seen.add(id);
+            const title =
+                (a.getAttribute('aria-label') || a.getAttribute('title') || '').trim() ||
+                ((root.querySelector('h1,h2,h3,[class*="title"]') || {}).innerText || '').trim() ||
+                ((root.querySelector('img[alt]') || {}).alt || '').trim();
+            const creator =
+                ((root.querySelector('[class*="owner"], [class*="author"], [class*="user"], [class*="byline"]') || {}).innerText || '')
+                    .replace(/^by\\s+/i, '').trim();
+            const duration =
+                ((root.querySelector('time, [class*="duration"], [class*="time"]') || {}).innerText || '')
+                    .trim();
+            clips.push({
+                clip_id: id,
+                title,
+                creator,
+                duration,
+                thumbnail_url: thumb,
+                source_url: href.startsWith('http') ? href : location.origin + href,
+                resolution: '',
+                tags: '',
+                collection: '',
+                m3u8_url: '',
+                frame_rate: '',
+                camera: '',
+                formats: '',
+            });
+        });
+        return clips;
+    })()
+    """,
+))
+
+SiteProfile.register(SiteProfile(
     'Generic',
     description='Auto-detect video streams on any site (M3U8, MP4, WebM, DASH)',
     domains=[],  # allow all
@@ -1901,6 +1998,12 @@ class BrowserInstallWorker(QThread):
     finished      = pyqtSignal(bool)   # True = success
 
     def run(self):
+        if _is_frozen():
+            self.log_signal.emit(
+                "[Setup] Browser install is unavailable from the packaged EXE. "
+                "Run the source setup command: python -m playwright install chromium")
+            self.finished.emit(False)
+            return
         import subprocess as _sp
         self.log_signal.emit("[Setup] Installing Playwright Chromium browser...")
         try:
@@ -6303,7 +6406,7 @@ class MainWindow(QMainWindow):
         self._dl_worker      = None   # DownloadWorker instance
         self._db_path        = os.path.join(get_config_dir(), 'artlist_results.db')
 
-        self.setWindowTitle("Video Scraper  v1.4.0")
+        self.setWindowTitle("Video Scraper  v0.7.2")
         self.setMinimumSize(Z(960), Z(600))
         self.resize(Z(1400), Z(860))
 

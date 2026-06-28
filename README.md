@@ -1,6 +1,6 @@
 # Stock Video Collector
 
-![Version](https://img.shields.io/badge/version-0.7.1-blue)
+![Version](https://img.shields.io/badge/version-0.7.2-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white)
 ![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?logo=qt&logoColor=white)
 ![Playwright](https://img.shields.io/badge/Playwright-Headless_Browser-2EAD33?logo=playwright&logoColor=white)
@@ -15,18 +15,28 @@
 ## Quick Start
 
 ```bash
-git clone https://github.com/SysAdminDoc/VideoScraper.git
-cd VideoScraper
-python artlist_scraper.py  # Auto-installs all dependencies on first run
+git clone https://github.com/SysAdminDoc/Stock-Video-Collector.git
+cd Stock-Video-Collector
+py -3 -m venv .venv
+.\.venv\Scripts\python -m pip install -r requirements.txt
+.\.venv\Scripts\python -m playwright install chromium
+.\.venv\Scripts\python artlist_scraper.py
 ```
 
-That's it. The script bootstraps everything automatically:
+The setup installs:
 
-1. Installs Python packages (`PyQt6`, `playwright`, etc.)
-2. Downloads Chromium via Playwright
-3. Launches the GUI
+1. Python packages (`PyQt6`, `playwright`, `imageio-ffmpeg`)
+2. Chromium for Playwright crawling
+3. The dark PyQt6 desktop GUI
 
 > **Requirements:** Python 3.9+ — no other prerequisites. Works on Windows, Linux, and macOS.
+
+### Build EXE
+
+```bash
+.\.venv\Scripts\python -m pip install pyinstaller
+.\.venv\Scripts\python -m PyInstaller --onefile --windowed --name Stock-Video-Collector --icon icon.ico --add-data "icon.png;." --runtime-hook build_hooks/runtime_hook_mp.py artlist_scraper.py
+```
 
 ---
 
@@ -37,6 +47,7 @@ That's it. The script bootstraps everything automatically:
 | Site | Video Types | Metadata | Pagination |
 |------|-------------|----------|------------|
 | **Artlist** | M3U8 HLS streams | Clip ID, resolution, duration, FPS, camera, formats, creator, collection, tags | Infinite scroll |
+| **Vimeo** | HLS, MP4, WebM, DASH previews | OpenGraph, JSON-LD, channel/card metadata | Channel/group/showcase grids + infinite scroll |
 | **Pexels** | MP4 direct (SD/HD/UHD via Canva CDN) | OpenGraph + JSON-LD, URL slug titles | Load More button (up to 15 clicks) |
 | **Pixabay** | MP4, WebM | OpenGraph + JSON-LD | Infinite scroll |
 | **Storyblocks** | M3U8, MP4, WebM | OpenGraph + JSON-LD | Infinite scroll |
