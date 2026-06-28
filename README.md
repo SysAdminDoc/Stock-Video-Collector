@@ -1,6 +1,6 @@
 # Stock Video Collector
 
-![Version](https://img.shields.io/badge/version-0.7.3-blue)
+![Version](https://img.shields.io/badge/version-0.7.4-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white)
 ![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?logo=qt&logoColor=white)
 ![Playwright](https://img.shields.io/badge/Playwright-Headless_Browser-2EAD33?logo=playwright&logoColor=white)
@@ -48,6 +48,9 @@ The setup installs:
 |------|-------------|----------|------------|
 | **Artlist** | M3U8 HLS streams | Clip ID, resolution, duration, FPS, camera, formats, creator, collection, tags | Infinite scroll |
 | **Adobe Stock** | Watermarked MP4/WebM/HLS/DASH previews | OpenGraph, JSON-LD, asset cards, preview metadata | Search/video grids + infinite scroll |
+| **Shutterstock** | MP4/WebM/HLS/DASH previews | OpenGraph, JSON-LD, clip cards, preview metadata | Video/search grids + infinite scroll |
+| **Envato Elements** | MP4/WebM/HLS/DASH previews | OpenGraph, JSON-LD, item cards, preview metadata | Stock-video grids + infinite scroll |
+| **Motion Array** | MP4/WebM/HLS/DASH previews | OpenGraph, JSON-LD, product cards, preview metadata | Stock-video grids + infinite scroll |
 | **Vimeo** | HLS, MP4, WebM, DASH previews | OpenGraph, JSON-LD, channel/card metadata | Channel/group/showcase grids + infinite scroll |
 | **Pexels** | MP4 direct (SD/HD/UHD via Canva CDN) | OpenGraph + JSON-LD, URL slug titles | Load More button (up to 15 clicks) |
 | **Pixabay** | MP4, WebM | OpenGraph + JSON-LD | Infinite scroll |

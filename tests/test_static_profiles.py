@@ -113,5 +113,43 @@ class AdobeStockProfileTests(unittest.TestCase):
         self.assertIn("source_url", extractor_js)
 
 
+class PreviewMarketplaceProfileTests(unittest.TestCase):
+    def test_shutterstock_profile_covers_video_clip_pages(self):
+        profile = _profile_constructor("Shutterstock")
+        item_re = re.compile(_kw(profile, "item_url_regex"))
+        id_re = re.compile(_kw(profile, "clip_id_regex"))
+
+        url = "https://www.shutterstock.com/video/clip-1105380147-aerial-city"
+        self.assertEqual(_kw(profile, "start_url"), "https://www.shutterstock.com/video")
+        self.assertRegex(url, item_re)
+        self.assertEqual(id_re.search(url).group(1), "1105380147")
+        self.assertEqual(_kw(profile, "video_types"), ["mp4", "webm", "m3u8", "mpd"])
+        self.assertIn("Preview", _kw(profile, "catalog_card_js"))
+
+    def test_envato_elements_profile_covers_stock_video_items(self):
+        profile = _profile_constructor("Envato Elements")
+        item_re = re.compile(_kw(profile, "item_url_regex"), re.IGNORECASE)
+        id_re = re.compile(_kw(profile, "clip_id_regex"), re.IGNORECASE)
+
+        url = "https://elements.envato.com/clean-video-opener-AB12CD3"
+        self.assertEqual(_kw(profile, "start_url"), "https://elements.envato.com/stock-video")
+        self.assertRegex(url, item_re)
+        self.assertEqual(id_re.search(url).group(1), "AB12CD3")
+        self.assertIn("/stock-video", _kw(profile, "catalog_patterns"))
+        self.assertIn("Preview", _kw(profile, "catalog_card_js"))
+
+    def test_motion_array_profile_covers_stock_video_items(self):
+        profile = _profile_constructor("Motion Array")
+        item_re = re.compile(_kw(profile, "item_url_regex"))
+        id_re = re.compile(_kw(profile, "clip_id_regex"))
+
+        url = "https://motionarray.com/stock-video/drone-coastline-123456/"
+        self.assertEqual(_kw(profile, "start_url"), "https://motionarray.com/stock-video/")
+        self.assertRegex(url, item_re)
+        self.assertEqual(id_re.search(url).group(1), "123456")
+        self.assertIn("/stock-video", _kw(profile, "catalog_patterns"))
+        self.assertIn("Preview", _kw(profile, "catalog_card_js"))
+
+
 if __name__ == "__main__":
     unittest.main()
