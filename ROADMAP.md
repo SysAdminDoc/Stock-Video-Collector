@@ -83,13 +83,6 @@ Roadmap for Stock Video Collector - a PyQt6 + Playwright desktop tool that crawl
 
 ## Research-Driven Additions
 
-- [ ] P0 - Add credential vault and redacted diagnostics
-  Why: API keys, proxy credentials, and session-related settings should not live in plaintext JSON or leak into logs as official API modes expand.
-  Evidence: `load_config`/`save_config` in `artlist_scraper.py`, Pexels/Pixabay/Vimeo/Adobe Stock API docs.
-  Touches: config storage, API connector settings, crawl/download logging, crash log writer, export diagnostics.
-  Acceptance: Secrets are stored via OS keyring or encrypted fallback, logs/crash reports redact tokens/cookies/query credentials, and config export excludes secrets by default.
-  Complexity: L
-
 - [ ] P1 - Add optional official API connector layer
   Why: Pexels, Pixabay, Vimeo, and Adobe Stock expose official search APIs that can reduce browser fragility and improve metadata completeness.
   Evidence: Pexels API docs, Pixabay API docs, Vimeo API docs, Adobe Stock API docs, existing API-first roadmap notes.

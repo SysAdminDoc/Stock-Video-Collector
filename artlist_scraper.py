@@ -75,11 +75,12 @@ import multiprocessing
 multiprocessing.freeze_support()
 
 from pathlib import Path
-import sys, os, subprocess, traceback, re, random, shutil
+import sys, os, subprocess, traceback, re, random, shutil, base64, hashlib, hmac
+import secrets as _secrets
 
 APP_NAME = "Stock Video Collector"
 APP_PACKAGE_NAME = "Stock-Video-Collector"
-APP_VERSION = "0.7.7"
+APP_VERSION = "0.7.8"
 APP_WINDOW_TITLE = f"{APP_NAME}  v{APP_VERSION}"
 
 
@@ -99,6 +100,52 @@ def _branding_icon_path() -> Path:
     return Path("icon.png")
 
 
+_SENSITIVE_KEY_RE = re.compile(
+    r'(api[_-]?key|access[_-]?key|secret|token|password|passwd|pwd|authorization|cookie|session|bearer|client[_-]?secret|refresh[_-]?token|proxy)',
+    re.IGNORECASE,
+)
+_SENSITIVE_QUERY_RE = re.compile(
+    r'([?&][^=&\s]*(?:api[_-]?key|access[_-]?key|token|secret|signature|sig|auth|credential|policy|expires)[^=&\s]*=)([^&\s]+)',
+    re.IGNORECASE,
+)
+_SENSITIVE_HEADER_RE = re.compile(
+    r'\b(authorization|cookie|x-api-key|api-key|x-auth-token|proxy-authorization)\s*[:=]\s*([^\r\n]+)',
+    re.IGNORECASE,
+)
+_BEARER_RE = re.compile(r'\bBearer\s+[A-Za-z0-9._~+/=-]+', re.IGNORECASE)
+_SECRET_REF_KEY = "__secret_ref__"
+_REDACTED = "[REDACTED]"
+
+
+def _is_sensitive_key(key):
+    return bool(_SENSITIVE_KEY_RE.search(str(key or '')))
+
+
+def _redact_text(value):
+    text = str(value)
+    text = _SENSITIVE_QUERY_RE.sub(lambda m: f"{m.group(1)}{_REDACTED}", text)
+    text = _BEARER_RE.sub(f"Bearer {_REDACTED}", text)
+    text = _SENSITIVE_HEADER_RE.sub(lambda m: f"{m.group(1)}: {_REDACTED}", text)
+    return text
+
+
+def _redact_obj(value):
+    if isinstance(value, dict):
+        if _SECRET_REF_KEY in value:
+            return _REDACTED
+        return {
+            k: (_REDACTED if _is_sensitive_key(k) else _redact_obj(v))
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_obj(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_obj(v) for v in value)
+    if isinstance(value, str):
+        return _redact_text(value)
+    return value
+
+
 # Hide console window on Windows immediately (before any prints)
 if sys.platform == 'win32':
     try:
@@ -116,15 +163,16 @@ if sys.platform == 'win32':
 
 def _crash_handler(exc_type, exc_value, exc_tb):
     msg = ''.join(traceback.format_exception(exc_type, exc_value, exc_tb))
+    safe_msg = _redact_text(msg)
     crash_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'crash.log')
     try:
-        with open(crash_file, 'w') as f: f.write(msg)
+        with open(crash_file, 'w') as f: f.write(safe_msg)
     except Exception: pass
-    print(f"[FATAL]\n{msg}")
+    print(f"[FATAL]\n{safe_msg}")
     try:
         import ctypes
         ctypes.windll.user32.MessageBoxW(
-            0, f"Fatal error:\n{crash_file}\n\n{msg[:800]}", f"{APP_NAME} - Fatal Error", 0x10)
+            0, f"Fatal error:\n{crash_file}\n\n{safe_msg[:800]}", f"{APP_NAME} - Fatal Error", 0x10)
     except Exception: pass
     sys.exit(1)
 
@@ -1539,15 +1587,166 @@ def get_config_dir():
     os.makedirs(p, exist_ok=True)
     return p
 
+
+def _secret_key_path():
+    return os.path.join(get_config_dir(), 'secrets.key')
+
+
+def _secret_vault_path():
+    return os.path.join(get_config_dir(), 'secrets.json')
+
+
+def _load_secret_key():
+    path = _secret_key_path()
+    if os.path.isfile(path):
+        with open(path, 'rb') as fh:
+            return base64.b64decode(fh.read().strip())
+    key = _secrets.token_bytes(32)
+    with open(path, 'wb') as fh:
+        fh.write(base64.b64encode(key))
+    try:
+        os.chmod(path, 0o600)
+    except Exception:
+        pass
+    return key
+
+
+def _xor_bytes(data, key, nonce):
+    out = bytearray()
+    counter = 0
+    while len(out) < len(data):
+        block = hmac.new(key, nonce + counter.to_bytes(8, 'big'), hashlib.sha256).digest()
+        out.extend(block)
+        counter += 1
+    return bytes(a ^ b for a, b in zip(data, out))
+
+
+def _encrypt_secret_value(value):
+    key = _load_secret_key()
+    nonce = _secrets.token_bytes(16)
+    payload = json.dumps({'value': value}, ensure_ascii=False).encode('utf-8')
+    ciphertext = _xor_bytes(payload, key, nonce)
+    mac = hmac.new(key, nonce + ciphertext, hashlib.sha256).digest()
+    return {
+        'v': 1,
+        'alg': 'hmac-sha256-stream',
+        'nonce': base64.b64encode(nonce).decode('ascii'),
+        'ct': base64.b64encode(ciphertext).decode('ascii'),
+        'mac': base64.b64encode(mac).decode('ascii'),
+    }
+
+
+def _decrypt_secret_value(blob):
+    key = _load_secret_key()
+    nonce = base64.b64decode(blob['nonce'])
+    ciphertext = base64.b64decode(blob['ct'])
+    expected = base64.b64decode(blob['mac'])
+    actual = hmac.new(key, nonce + ciphertext, hashlib.sha256).digest()
+    if not hmac.compare_digest(expected, actual):
+        raise ValueError("secret vault integrity check failed")
+    payload = _xor_bytes(ciphertext, key, nonce).decode('utf-8')
+    return json.loads(payload).get('value', '')
+
+
+def _load_secret_vault():
+    path = _secret_vault_path()
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding='utf-8') as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_secret_vault(vault):
+    path = _secret_vault_path()
+    with open(path, 'w', encoding='utf-8') as fh:
+        json.dump(vault, fh, indent=2)
+    try:
+        os.chmod(path, 0o600)
+    except Exception:
+        pass
+
+
+def _secret_id_for_path(path_parts):
+    raw = ".".join(str(p) for p in path_parts)
+    digest = hashlib.sha256(raw.encode('utf-8')).hexdigest()[:24]
+    return f"cfg.{digest}"
+
+
+def _is_secret_ref(value):
+    return isinstance(value, dict) and set(value.keys()) == {_SECRET_REF_KEY}
+
+
+def _config_with_secret_refs(value, path_parts=(), vault=None):
+    if vault is None:
+        vault = _load_secret_vault()
+    if isinstance(value, dict):
+        if _is_secret_ref(value):
+            return value
+        out = {}
+        changed = False
+        for key, item in value.items():
+            child_path = path_parts + (key,)
+            if _is_sensitive_key(key) and item not in (None, '') and not _is_secret_ref(item):
+                secret_id = _secret_id_for_path(child_path)
+                vault[secret_id] = _encrypt_secret_value(item)
+                out[key] = {_SECRET_REF_KEY: secret_id}
+                changed = True
+            else:
+                converted = _config_with_secret_refs(item, child_path, vault)
+                out[key] = converted
+                changed = changed or converted != item
+        if changed:
+            _save_secret_vault(vault)
+        return out
+    if isinstance(value, list):
+        return [_config_with_secret_refs(item, path_parts + (idx,), vault) for idx, item in enumerate(value)]
+    return value
+
+
+def _hydrate_config_secrets(value, vault=None):
+    if vault is None:
+        vault = _load_secret_vault()
+    if _is_secret_ref(value):
+        secret_id = value.get(_SECRET_REF_KEY, '')
+        blob = vault.get(secret_id)
+        if not blob:
+            return ''
+        try:
+            return _decrypt_secret_value(blob)
+        except Exception:
+            return ''
+    if isinstance(value, dict):
+        return {k: _hydrate_config_secrets(v, vault) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_hydrate_config_secrets(item, vault) for item in value]
+    return value
+
+
+def _public_config(value):
+    return _redact_obj(_config_with_secret_refs(value))
+
+
 def load_config():
     f = os.path.join(get_config_dir(), 'config.json')
     try:
-        with open(f) as fh: return json.load(fh)
+        with open(f, encoding='utf-8') as fh:
+            raw = json.load(fh)
+        sanitized = _config_with_secret_refs(raw)
+        if sanitized != raw:
+            with open(f, 'w', encoding='utf-8') as fh:
+                json.dump(sanitized, fh, indent=2)
+        return _hydrate_config_secrets(sanitized)
     except Exception: return {}
 
 def save_config(cfg):
     f = os.path.join(get_config_dir(), 'config.json')
-    with open(f, 'w') as fh: json.dump(cfg, fh, indent=2)
+    sanitized = _config_with_secret_refs(cfg or {})
+    with open(f, 'w', encoding='utf-8') as fh:
+        json.dump(sanitized, fh, indent=2)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SITE PROFILE SYSTEM
@@ -9032,6 +9231,7 @@ class MainWindow(QMainWindow):
     # ── Signal Handlers ─────────────────────────────────────────────────────
 
     def _on_log(self, msg, level):
+        msg = _redact_text(msg)
         # Filter DEBUG messages based on verbose checkbox
         if level == 'DEBUG' and hasattr(self, 'chk_verbose_log') and not self.chk_verbose_log.isChecked():
             return
@@ -9745,6 +9945,7 @@ class MainWindow(QMainWindow):
         if self._dl_worker: self._dl_worker.stop()
 
     def _on_dl_log(self, msg, level):
+        msg = _redact_text(msg)
         clr = {'OK':C('success'),'ERROR':C('error'),'WARN':C('warning')}.get(level,C('text'))
         self.dl_log.append(
             f'<span style="color:{clr};font-family:Consolas;font-size:{Z(11)}px;">'
@@ -9887,8 +10088,10 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self,"Load Config",get_config_dir(),"JSON (*.json)")
         if path:
             try:
-                with open(path) as f: self._apply_config(json.load(f))
-            except Exception as e: QMessageBox.critical(self,"Error",str(e))
+                with open(path, encoding='utf-8') as f:
+                    imported = json.load(f)
+                self._apply_config(_hydrate_config_secrets(_config_with_secret_refs(imported)))
+            except Exception as e: QMessageBox.critical(self,"Error",_redact_text(str(e)))
 
     def _load_saved_config(self):
         cfg = load_config()

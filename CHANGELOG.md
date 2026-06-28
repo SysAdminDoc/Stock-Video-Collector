@@ -2,6 +2,12 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.7.8] - 2026-06-28
+
+- Added: Sensitive config values are migrated out of plaintext `config.json` into an encrypted local vault with `__secret_ref__` pointers.
+- Added: Crash output, GUI logs, download logs, config import errors, and diagnostic strings redact tokens, cookies, auth headers, and sensitive query parameters.
+- Added: Secret vault and redaction tests covering config migration, runtime hydration, and recursive diagnostic scrubbing.
+
 ## [v0.7.7] - 2026-06-28
 
 - Added: Clear DB now creates a timestamped SQLite backup, clears immediately without a confirmation dialog, and exposes Restore Last Backup in-app.
