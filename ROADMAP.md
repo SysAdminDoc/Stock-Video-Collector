@@ -138,3 +138,52 @@ Roadmap for Stock Video Collector - a PyQt6 + Playwright desktop tool that crawl
   Touches: export tab, collection selection, zip/tar creation, manifest schema, sidecar writer.
   Acceptance: A selected collection/search can export a folder or archive containing clips, thumbnails, sidecars, license/provenance manifest, and checksum file.
   Complexity: M
+
+- [ ] P0 — Add shared URL safety policy for all app-initiated fetches
+  Why: Crawled/imported URLs can currently reach local or private network targets unless each caller remembers to guard them.
+  Evidence: `artlist_scraper.py:4239`, `artlist_scraper.py:6658`, OWASP SSRF guidance.
+  Touches: crawler/direct HTTP fetches, download preflight, thumbnail fetches, import URL handling, tests.
+  Acceptance: HTTP(S) fetch helpers block localhost, RFC1918, link-local, metadata-service, non-HTTP(S), redirect-to-private, and ambiguous IP-literal targets; blocked attempts are logged without leaking secrets.
+  Complexity: M
+
+- [ ] P1 — Keep Direct HTTP crawl mode usable without Chromium
+  Why: Direct HTTP mode does not need Playwright, but the Start button is disabled when Chromium is missing.
+  Evidence: `artlist_scraper.py:9073`, `artlist_scraper.py:9123`.
+  Touches: browser status check, crawl mode selection handling, `_start_crawl`, status copy, tests.
+  Acceptance: selecting Direct HTTP enables crawl start even when Playwright Chromium is unavailable; browser-required modes still show install guidance and stay blocked.
+  Complexity: S
+
+- [ ] P1 — Migrate legacy `ArtlistScraper` app data path to `StockVideoCollector`
+  Why: Persisting config, vault data, backups, and the database under the old product name makes support and migration confusing.
+  Evidence: `artlist_scraper.py:1584`, `artlist_scraper.py:7116`, `README.md`.
+  Touches: config path helpers, startup migration, DB/vault/backup paths, tests.
+  Acceptance: first launch creates/uses a `StockVideoCollector` config directory, migrates or compatibility-reads legacy `ArtlistScraper` data without data loss, and logs the migration result.
+  Complexity: M
+
+- [ ] P1 — Move stored secrets to OS-backed keyring with local fallback
+  Why: The current vault redacts JSON but relies on a local key file; official API, proxy, and cookie work will add higher-value credentials.
+  Evidence: `artlist_scraper.py:1599`, Python keyring project.
+  Touches: secret vault helpers, config migration, settings UI copy, tests.
+  Acceptance: secrets migrate to OS credential storage when available, keep a clearly logged local fallback when not available, and preserve existing redaction behavior.
+  Complexity: M
+
+- [ ] P2 — Add local dependency audit and reproducible release gate
+  Why: Broad dependency ranges make releases depend on the current venv state, and there is no local vulnerability audit in release verification.
+  Evidence: `requirements.txt`, `tools/build_release.py`, pip-audit project.
+  Touches: requirements/constraints, release verification script, README release steps, tests.
+  Acceptance: release verification records/resolves deterministic dependency versions, runs a local vulnerability audit, fails on incompatible or vulnerable core dependencies, and remains local-only with no CI workflow.
+  Complexity: M
+
+- [ ] P2 — Remove hidden keyboard shortcuts and keep actions visible
+  Why: Current project instructions prohibit keyboard shortcuts, but the app registers hidden `QShortcut` bindings.
+  Evidence: `artlist_scraper.py:7169`, `README.md` keyboard shortcuts section, `AGENTS.md`.
+  Touches: `MainWindow` action wiring, toolbar/context/menu controls, README usage docs, static tests.
+  Acceptance: no `QShortcut`/`QKeySequence` action bindings remain; every removed shortcut action is reachable through visible UI controls; tests or static checks prevent reintroduction.
+  Complexity: S
+
+- [ ] P2 — Add database backup catalog with checksum, retention, and selected restore
+  Why: Current recovery restores only the latest pre-clear backup, which is weak for long-running local libraries.
+  Evidence: `artlist_scraper.py:863`, `artlist_scraper.py:881`, `artlist_scraper.py:10167`, `artlist_scraper.py:10215`.
+  Touches: DB backup helpers, Crawl/Admin tab recovery UI, backup metadata, tests.
+  Acceptance: users can view timestamp/size/checksum for available backups, restore a selected verified backup, and configure/delete backups by retention policy.
+  Complexity: M
