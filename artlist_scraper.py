@@ -80,10 +80,12 @@ import secrets as _secrets
 
 APP_NAME = "Stock Video Collector"
 APP_PACKAGE_NAME = "Stock-Video-Collector"
-APP_VERSION = "0.7.11"
+APP_VERSION = "0.7.12"
 APP_WINDOW_TITLE = f"{APP_NAME}  v{APP_VERSION}"
 APP_CONFIG_DIR_NAME = "StockVideoCollector"
 LEGACY_APP_CONFIG_DIR_NAME = "ArtlistScraper"
+SECRET_KEYRING_SERVICE = APP_PACKAGE_NAME
+DISABLE_KEYRING_ENV = "STOCK_VIDEO_COLLECTOR_DISABLE_KEYRING"
 
 
 def _branding_icon_path() -> Path:
@@ -1807,6 +1809,85 @@ def _secret_vault_path():
     return os.path.join(get_config_dir(), 'secrets.json')
 
 
+_SECRET_STORAGE_MESSAGE = ""
+
+
+def _set_secret_storage_message(msg):
+    global _SECRET_STORAGE_MESSAGE
+    if not _SECRET_STORAGE_MESSAGE:
+        _SECRET_STORAGE_MESSAGE = msg
+
+
+def _consume_secret_storage_message():
+    global _SECRET_STORAGE_MESSAGE
+    msg = _SECRET_STORAGE_MESSAGE
+    _SECRET_STORAGE_MESSAGE = ""
+    return msg
+
+
+def _keyring_disabled():
+    return str(os.environ.get(DISABLE_KEYRING_ENV, "")).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _keyring_backend():
+    if _keyring_disabled():
+        _set_secret_storage_message("OS keyring disabled; using local encrypted secret vault.")
+        return None
+    try:
+        import keyring
+        return keyring
+    except Exception:
+        _set_secret_storage_message("OS keyring unavailable; using local encrypted secret vault.")
+        return None
+
+
+def _encode_secret_payload(value):
+    return json.dumps({'value': value}, ensure_ascii=False)
+
+
+def _decode_secret_payload(payload):
+    try:
+        data = json.loads(payload or "")
+        if isinstance(data, dict) and 'value' in data:
+            return data.get('value', '')
+    except Exception:
+        pass
+    return payload or ''
+
+
+def _keyring_secret_blob(secret_id, value):
+    backend = _keyring_backend()
+    if backend is None:
+        return None
+    try:
+        backend.set_password(SECRET_KEYRING_SERVICE, secret_id, _encode_secret_payload(value))
+        return {
+            'v': 2,
+            'backend': 'keyring',
+            'service': SECRET_KEYRING_SERVICE,
+            'username': secret_id,
+        }
+    except Exception as e:
+        _set_secret_storage_message(
+            f"OS keyring write failed; using local encrypted secret vault: {_redact_text(e)}")
+        return None
+
+
+def _keyring_secret_value(blob):
+    backend = _keyring_backend()
+    if backend is None:
+        return ''
+    try:
+        payload = backend.get_password(
+            str(blob.get('service') or SECRET_KEYRING_SERVICE),
+            str(blob.get('username') or ''))
+        return _decode_secret_payload(payload)
+    except Exception as e:
+        _set_secret_storage_message(
+            f"OS keyring read failed; using available local secret data: {_redact_text(e)}")
+        return ''
+
+
 def _load_secret_key():
     path = _secret_key_path()
     if os.path.isfile(path):
@@ -1832,10 +1913,10 @@ def _xor_bytes(data, key, nonce):
     return bytes(a ^ b for a, b in zip(data, out))
 
 
-def _encrypt_secret_value(value):
+def _local_secret_blob(value):
     key = _load_secret_key()
     nonce = _secrets.token_bytes(16)
-    payload = json.dumps({'value': value}, ensure_ascii=False).encode('utf-8')
+    payload = _encode_secret_payload(value).encode('utf-8')
     ciphertext = _xor_bytes(payload, key, nonce)
     mac = hmac.new(key, nonce + ciphertext, hashlib.sha256).digest()
     return {
@@ -1847,7 +1928,13 @@ def _encrypt_secret_value(value):
     }
 
 
+def _secret_blob_for_value(secret_id, value):
+    return _keyring_secret_blob(secret_id, value) or _local_secret_blob(value)
+
+
 def _decrypt_secret_value(blob):
+    if isinstance(blob, dict) and blob.get('backend') == 'keyring':
+        return _keyring_secret_value(blob)
     key = _load_secret_key()
     nonce = base64.b64decode(blob['nonce'])
     ciphertext = base64.b64decode(blob['ct'])
@@ -1856,7 +1943,25 @@ def _decrypt_secret_value(blob):
     if not hmac.compare_digest(expected, actual):
         raise ValueError("secret vault integrity check failed")
     payload = _xor_bytes(ciphertext, key, nonce).decode('utf-8')
-    return json.loads(payload).get('value', '')
+    return _decode_secret_payload(payload)
+
+
+def _migrate_vault_to_keyring(vault):
+    if _keyring_backend() is None:
+        return False
+    changed = False
+    for secret_id, blob in list((vault or {}).items()):
+        if not isinstance(blob, dict) or blob.get('backend') == 'keyring':
+            continue
+        try:
+            value = _decrypt_secret_value(blob)
+        except Exception:
+            continue
+        keyring_blob = _keyring_secret_blob(secret_id, value)
+        if keyring_blob:
+            vault[secret_id] = keyring_blob
+            changed = True
+    return changed
 
 
 def _load_secret_vault():
@@ -1866,7 +1971,11 @@ def _load_secret_vault():
     try:
         with open(path, encoding='utf-8') as fh:
             data = json.load(fh)
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            return {}
+        if _migrate_vault_to_keyring(data):
+            _save_secret_vault(data)
+        return data
     except Exception:
         return {}
 
@@ -1903,7 +2012,7 @@ def _config_with_secret_refs(value, path_parts=(), vault=None):
             child_path = path_parts + (key,)
             if _is_sensitive_key(key) and item not in (None, '') and not _is_secret_ref(item):
                 secret_id = _secret_id_for_path(child_path)
-                vault[secret_id] = _encrypt_secret_value(item)
+                vault[secret_id] = _secret_blob_for_value(secret_id, item)
                 out[key] = {_SECRET_REF_KEY: secret_id}
                 changed = True
             else:
@@ -7339,7 +7448,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._load_saved_config()
         self._check_browser_status()
-        self._emit_config_migration_status()
+        self._emit_startup_storage_status()
 
         self._dl_clip_rows = {}   # populated by _start_downloads
         self._dl_done_count = 0
@@ -9287,12 +9396,13 @@ class MainWindow(QMainWindow):
 
     # ── Browser management ──────────────────────────────────────────────────
 
-    def _emit_config_migration_status(self):
-        msg = _consume_config_migration_message()
-        if not msg:
-            return
-        self._on_log(msg, "OK" if "failed" not in msg.lower() else "ERROR")
-        self.status_bar.showMessage(msg, 8000)
+    def _emit_startup_storage_status(self):
+        for msg in (_consume_config_migration_message(), _consume_secret_storage_message()):
+            if not msg:
+                continue
+            level = "ERROR" if "failed" in msg.lower() else "WARN" if "fallback" in msg.lower() or "unavailable" in msg.lower() else "OK"
+            self._on_log(msg, level)
+            self.status_bar.showMessage(msg, 8000)
 
     def _current_crawl_mode(self):
         if hasattr(self, 'combo_crawl_mode'):
@@ -10320,7 +10430,12 @@ class MainWindow(QMainWindow):
 
     def _save_cfg(self):
         save_config(self._collect_config())
-        self.status_bar.showMessage("Configuration saved.")
+        msg = _consume_secret_storage_message()
+        if msg:
+            self._on_log(msg, "WARN" if "fallback" in msg.lower() or "unavailable" in msg.lower() else "INFO")
+            self.status_bar.showMessage(f"Configuration saved. {msg}", 8000)
+        else:
+            self.status_bar.showMessage("Configuration saved.")
 
     def _load_cfg_file(self):
         path, _ = QFileDialog.getOpenFileName(self,"Load Config",get_config_dir(),"JSON (*.json)")

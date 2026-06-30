@@ -2,6 +2,12 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.7.12] - 2026-06-30
+
+- Changed: Sensitive config values now store in the OS keyring when available, with the existing encrypted local vault as a logged fallback.
+- Changed: Existing local vault entries migrate to keyring metadata when a usable keyring backend is available.
+- Added: Keyring/fallback tests using a fake credential backend so local verification does not touch real OS credentials.
+
 ## [v0.7.11] - 2026-06-30
 
 - Changed: App data now uses the `StockVideoCollector` config root, with startup migration that copies missing legacy `ArtlistScraper` config, vault, database, and backup files without overwriting current data.

@@ -139,13 +139,6 @@ Roadmap for Stock Video Collector - a PyQt6 + Playwright desktop tool that crawl
   Acceptance: A selected collection/search can export a folder or archive containing clips, thumbnails, sidecars, license/provenance manifest, and checksum file.
   Complexity: M
 
-- [ ] P1 — Move stored secrets to OS-backed keyring with local fallback
-  Why: The current vault redacts JSON but relies on a local key file; official API, proxy, and cookie work will add higher-value credentials.
-  Evidence: `artlist_scraper.py:1599`, Python keyring project.
-  Touches: secret vault helpers, config migration, settings UI copy, tests.
-  Acceptance: secrets migrate to OS credential storage when available, keep a clearly logged local fallback when not available, and preserve existing redaction behavior.
-  Complexity: M
-
 - [ ] P2 — Add local dependency audit and reproducible release gate
   Why: Broad dependency ranges make releases depend on the current venv state, and there is no local vulnerability audit in release verification.
   Evidence: `requirements.txt`, `tools/build_release.py`, pip-audit project.
