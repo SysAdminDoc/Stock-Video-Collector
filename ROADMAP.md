@@ -139,13 +139,6 @@ Roadmap for Stock Video Collector - a PyQt6 + Playwright desktop tool that crawl
   Acceptance: A selected collection/search can export a folder or archive containing clips, thumbnails, sidecars, license/provenance manifest, and checksum file.
   Complexity: M
 
-- [ ] P1 — Keep Direct HTTP crawl mode usable without Chromium
-  Why: Direct HTTP mode does not need Playwright, but the Start button is disabled when Chromium is missing.
-  Evidence: `artlist_scraper.py:9073`, `artlist_scraper.py:9123`.
-  Touches: browser status check, crawl mode selection handling, `_start_crawl`, status copy, tests.
-  Acceptance: selecting Direct HTTP enables crawl start even when Playwright Chromium is unavailable; browser-required modes still show install guidance and stay blocked.
-  Complexity: S
-
 - [ ] P1 — Migrate legacy `ArtlistScraper` app data path to `StockVideoCollector`
   Why: Persisting config, vault data, backups, and the database under the old product name makes support and migration confusing.
   Evidence: `artlist_scraper.py:1584`, `artlist_scraper.py:7116`, `README.md`.

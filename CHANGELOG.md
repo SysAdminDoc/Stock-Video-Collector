@@ -2,6 +2,11 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.7.10] - 2026-06-30
+
+- Fixed: Direct HTTP crawl mode stays startable when Playwright Chromium is missing, while browser-required crawl modes still show install guidance and remain blocked.
+- Added: Static crawl-mode tests for the browser-free Direct HTTP path and mode-aware Chromium gate.
+
 ## [v0.7.9] - 2026-06-30
 
 - Added: Shared URL safety policy for app-initiated crawler, thumbnail, GraphQL, direct HTTP, and download preflight fetches to block localhost, private/link-local networks, metadata services, non-HTTP(S) schemes, ambiguous IP literals, and redirect-to-private targets.

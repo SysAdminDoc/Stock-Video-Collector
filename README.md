@@ -1,6 +1,6 @@
 # Stock Video Collector
 
-![Version](https://img.shields.io/badge/version-0.7.9-blue)
+![Version](https://img.shields.io/badge/version-0.7.10-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white)
 ![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?logo=qt&logoColor=white)
 ![Playwright](https://img.shields.io/badge/Playwright-Headless_Browser-2EAD33?logo=playwright&logoColor=white)
@@ -251,7 +251,7 @@ Available variables: `{title}`, `{clip_id}`, `{creator}`, `{collection}`, `{reso
 
 ## Troubleshooting
 
-**"Chromium not found"** — Click the "Install Browser" button on the Crawl tab. This runs `playwright install chromium` automatically.
+**"Chromium not found"** — Click the "Install Browser" button on the Crawl tab. This runs `playwright install chromium` automatically. Direct HTTP mode can still start without Chromium.
 
 **Search results seem wrong or incomplete** — Click the "🔄 Rebuild Index" button on the Crawl tab to rebuild the FTS5 search index from scratch.
 

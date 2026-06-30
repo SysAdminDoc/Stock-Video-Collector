@@ -40,6 +40,28 @@ class StaticSourceTests(unittest.TestCase):
         py_compile.compile(str(APP), doraise=True)
 
 
+class CrawlModeAvailabilityTests(unittest.TestCase):
+    def test_direct_http_mode_does_not_require_browser(self):
+        import artlist_scraper as app
+
+        self.assertFalse(app.MainWindow._crawl_mode_requires_browser(object(), "direct_http"))
+        self.assertTrue(app.MainWindow._crawl_mode_requires_browser(object(), "full"))
+        self.assertTrue(app.MainWindow._crawl_mode_requires_browser(object(), "api_discover"))
+
+    def test_direct_http_start_path_precedes_chromium_gate(self):
+        source = APP.read_text(encoding="utf-8")
+        start_idx = source.index("def _start_crawl(self):")
+        pause_idx = source.index("def _toggle_pause", start_idx)
+        body = source[start_idx:pause_idx]
+
+        direct_idx = body.index("if mode == 'direct_http':")
+        chromium_idx = body.index("if not _chromium_is_ready():")
+
+        self.assertLess(direct_idx, chromium_idx)
+        self.assertIn("Direct HTTP mode ready; Chromium not required.", source)
+        self.assertIn("ready or not requires_browser", source)
+
+
 class VimeoProfileTests(unittest.TestCase):
     def test_vimeo_profile_covers_public_video_pages(self):
         profile = _profile_constructor("Vimeo")

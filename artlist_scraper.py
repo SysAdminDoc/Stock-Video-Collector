@@ -80,7 +80,7 @@ import secrets as _secrets
 
 APP_NAME = "Stock Video Collector"
 APP_PACKAGE_NAME = "Stock-Video-Collector"
-APP_VERSION = "0.7.9"
+APP_VERSION = "0.7.10"
 APP_WINDOW_TITLE = f"{APP_NAME}  v{APP_VERSION}"
 
 
@@ -7766,6 +7766,7 @@ class MainWindow(QMainWindow):
         self.btn_start = QPushButton("▶  Start Crawl")
         self.btn_start.setObjectName("success"); self.btn_start.setFixedHeight(Z(40))
         self.btn_start.clicked.connect(self._start_crawl)
+        self.combo_crawl_mode.currentIndexChanged.connect(lambda _idx: self._check_browser_status())
 
         self.btn_pause = QPushButton("⏸  Pause")
         self.btn_pause.setObjectName("warning"); self.btn_pause.setFixedHeight(Z(40))
@@ -9206,17 +9207,31 @@ class MainWindow(QMainWindow):
 
     # ── Browser management ──────────────────────────────────────────────────
 
+    def _current_crawl_mode(self):
+        if hasattr(self, 'combo_crawl_mode'):
+            return self.combo_crawl_mode.currentData() or 'full'
+        return 'full'
+
+    def _crawl_mode_requires_browser(self, mode=None):
+        return (mode or self._current_crawl_mode()) != 'direct_http'
+
     def _check_browser_status(self):
-        """Show/hide browser warning banner based on whether Chromium is ready."""
+        """Show/hide browser warning banner based on whether the selected mode needs Chromium."""
+        mode = self._current_crawl_mode()
+        requires_browser = self._crawl_mode_requires_browser(mode)
         ready = _chromium_is_ready()
-        self.browser_banner.setVisible(not ready)
-        self.btn_start.setEnabled(ready)
-        if ready:
+        can_start = ready or not requires_browser
+        self.browser_banner.setVisible(requires_browser and not ready)
+        if not (self.worker and self.worker.isRunning()):
+            self.btn_start.setEnabled(can_start)
+        if ready and requires_browser:
             self.status_bar.showMessage("Browser ready.")
+        elif not requires_browser:
+            self.status_bar.showMessage("Direct HTTP mode ready; Chromium not required.", 8000)
         else:
             self.status_bar.showMessage(
                 "Chromium not found. Click 'Install Browser' on the Crawl tab.", 8000)
-        return ready
+        return can_start
 
     def _install_browser(self):
         """Run playwright install chromium in a background thread with live log."""
