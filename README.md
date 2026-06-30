@@ -1,6 +1,6 @@
 # Stock Video Collector
 
-![Version](https://img.shields.io/badge/version-0.7.13-blue)
+![Version](https://img.shields.io/badge/version-0.7.14-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white)
 ![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?logo=qt&logoColor=white)
 ![Playwright](https://img.shields.io/badge/Playwright-Headless_Browser-2EAD33?logo=playwright&logoColor=white)
@@ -72,6 +72,7 @@ The **Generic** profile works on any site — it intercepts all video network re
 | Secret-safe config | API keys, auth headers, cookies, and proxy credentials are stored through the OS keyring when available, with encrypted local fallback |
 | Fetch safety policy | App-initiated HTTP(S) fetches block localhost, private/link-local networks, metadata services, ambiguous IP literals, and redirect-to-private targets |
 | App-data migration | Legacy `ArtlistScraper` config, vault, database, and backup files are copied into `StockVideoCollector` without overwriting current data |
+| Failed-crawl diagnostics | Browser crawls can save redacted trace, HTML snapshot, screenshot, and network log bundles for replay/debugging |
 
 ### Video Discovery
 
@@ -262,6 +263,8 @@ Available variables: `{title}`, `{clip_id}`, `{creator}`, `{collection}`, `{reso
 **Downloads fail repeatedly** — Check that ffmpeg is installed and on your PATH. The scraper auto-detects ffmpeg in common locations, but if it can't find it, downloads that require HLS→MP4 conversion will fail.
 
 **Downloaded files show as invalid** — Archive verification validates local videos with `ffprobe` when available and falls back to an `ffmpeg` stream check. Invalid files are reset to pending from the Archive tab so they can be re-queued.
+
+**A crawl page fails repeatedly** — Enable "Save failed-crawl diagnostics" in Configure. Failed browser pages write redacted diagnostic bundles under the app data `crawl_traces` folder with `metadata.json`, `snapshot.html`, `screenshot.png`, `network.har`, and Playwright `trace.zip`.
 
 **Clipboard monitor not working** — The clipboard monitor is opt-in. Enable it in your config by adding `"clipboard_monitor": true`, or toggle it programmatically. On Linux/Wayland, clipboard access may require additional permissions.
 

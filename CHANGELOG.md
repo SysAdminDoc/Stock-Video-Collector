@@ -2,6 +2,13 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.7.14] - 2026-06-30
+
+- Added: Browser crawl failures now save redacted diagnostics bundles with Playwright trace, HTML snapshot, screenshot, metadata, and HAR-style network log.
+- Added: Crawl trace replay helper for testing saved HTML snapshots without rerunning live crawls.
+- Changed: Configure tab includes a visible "Save failed-crawl diagnostics" toggle, enabled by default and persisted in config.
+- Fixed: Redaction now also scrubs standalone sensitive `key=value` fragments in exception strings while preserving safe query parameters.
+
 ## [v0.7.13] - 2026-06-30
 
 - Added: Clip license/provenance columns for source license name, license URL, attribution requirement/text, terms URL, and preview/watermark status.

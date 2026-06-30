@@ -76,11 +76,12 @@ multiprocessing.freeze_support()
 
 from pathlib import Path
 import sys, os, subprocess, traceback, re, random, shutil, base64, hashlib, hmac, ipaddress, socket
+import html as _html
 import secrets as _secrets
 
 APP_NAME = "Stock Video Collector"
 APP_PACKAGE_NAME = "Stock-Video-Collector"
-APP_VERSION = "0.7.13"
+APP_VERSION = "0.7.14"
 APP_WINDOW_TITLE = f"{APP_NAME}  v{APP_VERSION}"
 APP_CONFIG_DIR_NAME = "StockVideoCollector"
 LEGACY_APP_CONFIG_DIR_NAME = "ArtlistScraper"
@@ -125,6 +126,10 @@ _SENSITIVE_HEADER_RE = re.compile(
     r'\b(authorization|cookie|x-api-key|api-key|x-auth-token|proxy-authorization)\s*[:=]\s*([^\r\n]+)',
     re.IGNORECASE,
 )
+_SENSITIVE_ASSIGNMENT_RE = re.compile(
+    r'\b([A-Za-z0-9_.-]*(?:api[_-]?key|access[_-]?key|token|secret|signature|sig|auth|credential|password|passwd|pwd|cookie|session)[A-Za-z0-9_.-]*\s*[:=]\s*)([^\s,;&]+)',
+    re.IGNORECASE,
+)
 _BEARER_RE = re.compile(r'\bBearer\s+[A-Za-z0-9._~+/=-]+', re.IGNORECASE)
 _SECRET_REF_KEY = "__secret_ref__"
 _REDACTED = "[REDACTED]"
@@ -139,6 +144,7 @@ def _redact_text(value):
     text = _SENSITIVE_QUERY_RE.sub(lambda m: f"{m.group(1)}{_REDACTED}", text)
     text = _BEARER_RE.sub(f"Bearer {_REDACTED}", text)
     text = _SENSITIVE_HEADER_RE.sub(lambda m: f"{m.group(1)}: {_REDACTED}", text)
+    text = _SENSITIVE_ASSIGNMENT_RE.sub(lambda m: f"{m.group(1)}{_REDACTED}", text)
     return text
 
 
@@ -3003,6 +3009,54 @@ def _apply_source_provenance_defaults(data):
 M3U8_RE = VIDEO_PATTERNS['m3u8']
 
 
+def get_crawl_trace_dir():
+    path = os.path.join(get_config_dir(), 'crawl_traces')
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _crawl_trace_bundle_name(profile_name, page_type, url):
+    parsed = urlparse(str(url or ''))
+    host = re.sub(r'[^A-Za-z0-9._-]+', '-', parsed.netloc or 'unknown').strip('-')
+    path_part = re.sub(r'[^A-Za-z0-9._-]+', '-', parsed.path.strip('/') or 'root').strip('-')
+    path_part = path_part[:48] or 'root'
+    profile_part = re.sub(r'[^A-Za-z0-9._-]+', '-', str(profile_name or 'profile')).strip('-')
+    kind_part = re.sub(r'[^A-Za-z0-9._-]+', '-', str(page_type or 'page')).strip('-')
+    digest = hashlib.sha1(str(url or '').encode('utf-8', errors='ignore')).hexdigest()[:10]
+    stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    return f"{stamp}-{profile_part}-{kind_part}-{host}-{path_part}-{digest}"
+
+
+def replay_crawl_trace_bundle(bundle_dir):
+    bundle = Path(bundle_dir)
+    meta_path = bundle / 'metadata.json'
+    html_path = bundle / 'snapshot.html'
+    network_path = bundle / 'network.har'
+    metadata = {}
+    if meta_path.is_file():
+        with open(meta_path, encoding='utf-8') as fh:
+            metadata = json.load(fh)
+    html_text = html_path.read_text(encoding='utf-8', errors='replace') if html_path.is_file() else ''
+    profile = SiteProfile.get(metadata.get('profile', '')) or SiteProfile.get('Generic')
+    video_re = profile.get_combined_video_re() if profile else re.compile(r'')
+    video_urls = sorted({str(u).rstrip('"\'\\') for u in video_re.findall(html_text)})
+    links = sorted({
+        _html.unescape(m)
+        for m in re.findall(r'''href=["']([^"']+)["']''', html_text, re.IGNORECASE)
+    })
+    network = {}
+    if network_path.is_file():
+        with open(network_path, encoding='utf-8') as fh:
+            network = json.load(fh)
+    return {
+        'metadata': metadata,
+        'html': html_text,
+        'video_urls': video_urls,
+        'links': links,
+        'network': network,
+    }
+
+
 class BrowserInstallWorker(QThread):
     """Runs `playwright install chromium` in a background thread with live log output."""
     log_signal    = pyqtSignal(str)
@@ -3091,6 +3145,191 @@ class CrawlerWorker(QThread):
 
     def log(self, msg, level='INFO'):
         self.log_signal.emit(f"[{datetime.now().strftime('%H:%M:%S')}] [{level:5s}] {msg}", level)
+
+    def _trace_enabled(self):
+        return bool(self.cfg.get('crawl_trace_on_failure', True))
+
+    def _har_headers(self, headers):
+        redacted = _redact_obj(dict(headers or {}))
+        return [
+            {'name': str(k), 'value': str(v)}
+            for k, v in redacted.items()
+        ]
+
+    async def _start_trace_bundle(self, context, page, url, depth, page_type):
+        if not self._trace_enabled():
+            return None
+        state = {
+            'context': context,
+            'page': page,
+            'url': url,
+            'depth': depth,
+            'page_type': page_type,
+            'profile': self.profile.name if self.profile else '',
+            'created_at': datetime.now().isoformat(),
+            'entries': [],
+            'handlers': [],
+            'tracing': False,
+        }
+
+        def on_response(resp):
+            try:
+                req = resp.request
+                state['entries'].append({
+                    'startedDateTime': datetime.now().isoformat(),
+                    'request': {
+                        'method': req.method,
+                        'url': _redact_text(req.url),
+                        'httpVersion': 'HTTP/1.1',
+                        'headers': self._har_headers(req.headers),
+                        'queryString': [],
+                        'cookies': [],
+                        'headersSize': -1,
+                        'bodySize': -1,
+                        'resourceType': req.resource_type,
+                    },
+                    'response': {
+                        'status': resp.status,
+                        'statusText': '',
+                        'httpVersion': 'HTTP/1.1',
+                        'headers': self._har_headers(resp.headers),
+                        'cookies': [],
+                        'content': {'size': -1, 'mimeType': resp.headers.get('content-type', '')},
+                        'redirectURL': '',
+                        'headersSize': -1,
+                        'bodySize': -1,
+                    },
+                    'cache': {},
+                    'timings': {'send': -1, 'wait': -1, 'receive': -1},
+                    'time': -1,
+                })
+            except Exception:
+                pass
+
+        def on_request_failed(req):
+            try:
+                failure = req.failure or ''
+            except Exception:
+                failure = ''
+            try:
+                state['entries'].append({
+                    'startedDateTime': datetime.now().isoformat(),
+                    'request': {
+                        'method': req.method,
+                        'url': _redact_text(req.url),
+                        'httpVersion': 'HTTP/1.1',
+                        'headers': self._har_headers(req.headers),
+                        'queryString': [],
+                        'cookies': [],
+                        'headersSize': -1,
+                        'bodySize': -1,
+                        'resourceType': req.resource_type,
+                    },
+                    'response': {
+                        'status': 0,
+                        'statusText': _redact_text(failure),
+                        'httpVersion': 'HTTP/1.1',
+                        'headers': [],
+                        'cookies': [],
+                        'content': {'size': -1, 'mimeType': ''},
+                        'redirectURL': '',
+                        'headersSize': -1,
+                        'bodySize': -1,
+                    },
+                    'cache': {},
+                    'timings': {'send': -1, 'wait': -1, 'receive': -1},
+                    'time': -1,
+                })
+            except Exception:
+                pass
+
+        try:
+            page.on('response', on_response)
+            page.on('requestfailed', on_request_failed)
+            state['handlers'] = [('response', on_response), ('requestfailed', on_request_failed)]
+            await context.tracing.start(screenshots=True, snapshots=True, sources=False)
+            state['tracing'] = True
+        except Exception as e:
+            self.log(f"Trace start skipped: {_redact_text(e)}", "DEBUG")
+        return state
+
+    async def _finish_trace_bundle(self, state, failed=False, reason='', clip_meta=None):
+        if not state:
+            return ''
+        page = state.get('page')
+        context = state.get('context')
+        for event, handler in state.get('handlers', []):
+            try:
+                page.remove_listener(event, handler)
+            except Exception:
+                pass
+
+        bundle_dir = ''
+        try:
+            if failed:
+                bundle_name = _crawl_trace_bundle_name(
+                    state.get('profile'), state.get('page_type'), state.get('url'))
+                bundle_dir = os.path.join(get_crawl_trace_dir(), bundle_name)
+                os.makedirs(bundle_dir, exist_ok=True)
+                if state.get('tracing'):
+                    await context.tracing.stop(path=os.path.join(bundle_dir, 'trace.zip'))
+                await self._write_trace_bundle_files(state, bundle_dir, reason, clip_meta)
+                self.log(f"Saved crawl diagnostics: {bundle_dir}", "WARN")
+            elif state.get('tracing'):
+                await context.tracing.stop()
+        except Exception as e:
+            self.log(f"Trace finish skipped: {_redact_text(e)}", "DEBUG")
+            try:
+                if state.get('tracing'):
+                    await context.tracing.stop()
+            except Exception:
+                pass
+        return bundle_dir
+
+    async def _write_trace_bundle_files(self, state, bundle_dir, reason='', clip_meta=None):
+        page = state.get('page')
+        metadata = {
+            'created_at': datetime.now().isoformat(),
+            'profile': state.get('profile', ''),
+            'page_type': state.get('page_type', ''),
+            'depth': state.get('depth', 0),
+            'url': _redact_text(state.get('url', '')),
+            'reason': _redact_text(reason),
+            'clip_meta': _redact_obj(clip_meta or {}),
+            'files': {
+                'trace': 'trace.zip' if state.get('tracing') else '',
+                'html': 'snapshot.html',
+                'screenshot': 'screenshot.png',
+                'network': 'network.har',
+            },
+        }
+        try:
+            content = await page.content()
+        except Exception as e:
+            content = f"<!-- page content unavailable: {_redact_text(e)} -->"
+        with open(os.path.join(bundle_dir, 'snapshot.html'), 'w', encoding='utf-8') as fh:
+            fh.write(_redact_text(content))
+        try:
+            await page.screenshot(path=os.path.join(bundle_dir, 'screenshot.png'), full_page=True)
+        except Exception as e:
+            metadata['files']['screenshot_error'] = _redact_text(e)
+        har = {
+            'log': {
+                'version': '1.2',
+                'creator': {'name': APP_NAME, 'version': APP_VERSION},
+                'pages': [{
+                    'startedDateTime': state.get('created_at', ''),
+                    'id': 'page_1',
+                    'title': _redact_text(state.get('url', '')),
+                    'pageTimings': {},
+                }],
+                'entries': state.get('entries', []),
+            }
+        }
+        with open(os.path.join(bundle_dir, 'network.har'), 'w', encoding='utf-8') as fh:
+            json.dump(_redact_obj(har), fh, indent=2, ensure_ascii=False)
+        with open(os.path.join(bundle_dir, 'metadata.json'), 'w', encoding='utf-8') as fh:
+            json.dump(metadata, fh, indent=2, ensure_ascii=False)
 
     def run(self):
         # Must create a NEW event loop per thread.
@@ -3770,6 +4009,8 @@ class CrawlerWorker(QThread):
 
     async def _crawl_catalog(self, page, url, depth):
         self.log(f"CATALOG [d{depth}] {url}", "INFO")
+        trace_state = await self._start_trace_bundle(page.context, page, url, depth, 'catalog')
+        cat_handler_attached = False
 
         try:
             # ── Hook API response interception for bulk clip data ──────
@@ -3779,8 +4020,11 @@ class CrawlerWorker(QThread):
                 except Exception:
                     pass
             page.on('response', _cat_resp_handler)
+            cat_handler_attached = True
 
             if not await self._safe_goto(page, url):
+                await self._finish_trace_bundle(trace_state, failed=True, reason='catalog page load failed')
+                trace_state = None
                 self.db.mark_failed(url, depth); return
 
             # Randomized settle time for React/Next.js render
@@ -3867,16 +4111,27 @@ class CrawlerWorker(QThread):
             # Unhook catalog response handler
             try:
                 page.remove_listener('response', _cat_resp_handler)
+                cat_handler_attached = False
             except Exception:
                 pass
 
             self.db.mark_processed(url, depth)
+            await self._finish_trace_bundle(trace_state, failed=False)
+            trace_state = None
             self.log(
                 f"CATALOG done — {card_count} cards extracted, {queued} items queued  (depth {depth})",
                 "OK")
         except Exception as e:
             self.log(f"CATALOG error: {e}", "ERROR")
+            await self._finish_trace_bundle(trace_state, failed=True, reason=f"{type(e).__name__}: {e}")
+            trace_state = None
             self.db.mark_failed(url, depth)
+        finally:
+            if cat_handler_attached:
+                try:
+                    page.remove_listener('response', _cat_resp_handler)
+                except Exception:
+                    pass
 
     async def _extract_catalog_videos(self, page, source_url):
         """Extract video URLs directly from catalog pages (e.g. Pexels <video> tags)."""
@@ -4212,6 +4467,7 @@ class CrawlerWorker(QThread):
             clip_meta['clip_id'] = _pre_id.group(1)
 
         page = await context.new_page()
+        trace_state = await self._start_trace_bundle(context, page, url, depth, 'clip')
         try:
             async def on_resp(resp):
                 try:
@@ -4225,6 +4481,9 @@ class CrawlerWorker(QThread):
             self.log(f"  [1/6] Loading page...", "DEBUG")
             if not await self._safe_goto(page, url):
                 self.log(f"  [FAIL] Page load failed: {url}", "ERROR")
+                await self._finish_trace_bundle(
+                    trace_state, failed=True, reason='clip page load failed', clip_meta=clip_meta)
+                trace_state = None
                 self.db.mark_failed(url, depth); return
 
             # Randomized settle for React hydration
@@ -4334,10 +4593,15 @@ class CrawlerWorker(QThread):
                 f"+{queued} queued ({skipped_processed} already done, {skipped_excluded} excluded)",
                 "OK" if has_video else "WARN")
             self.stats_signal.emit(self.db.stats())
+            await self._finish_trace_bundle(trace_state, failed=False)
+            trace_state = None
 
         except Exception as e:
             import traceback as _tb
             self.log(f"CLIP error [{url[-50:]}]: {e}\n{_tb.format_exc()[:400]}", "ERROR")
+            await self._finish_trace_bundle(
+                trace_state, failed=True, reason=f"{type(e).__name__}: {e}", clip_meta=clip_meta)
+            trace_state = None
             self.db.mark_failed(url, depth)
         finally:
             try:
@@ -8015,7 +8279,11 @@ class MainWindow(QMainWindow):
         self.chk_headless = QCheckBox("Headless mode"); self.chk_headless.setChecked(True)
         self.chk_headless.setToolTip("Uncheck to see the browser — required for solving CAPTCHAs/challenges")
         self.chk_resume   = QCheckBox("Resume mode  (skip already-crawled pages)"); self.chk_resume.setChecked(True)
-        g4.addWidget(self.chk_headless); g4.addSpacing(Z(30)); g4.addWidget(self.chk_resume); g4.addStretch()
+        self.chk_crawl_trace = QCheckBox("Save failed-crawl diagnostics")
+        self.chk_crawl_trace.setChecked(True)
+        self.chk_crawl_trace.setToolTip("On crawler failures, save a redacted trace, HTML snapshot, screenshot, and network log.")
+        g4.addWidget(self.chk_headless); g4.addSpacing(Z(30)); g4.addWidget(self.chk_resume)
+        g4.addSpacing(Z(30)); g4.addWidget(self.chk_crawl_trace); g4.addStretch()
         lay.addWidget(grp4)
 
         # Output dir
@@ -9526,6 +9794,7 @@ class MainWindow(QMainWindow):
             'max_depth':    self.spin_max_depth.value(),
             'headless':     self.chk_headless.isChecked(),
             'resume':       self.chk_resume.isChecked(),
+            'crawl_trace_on_failure': self.chk_crawl_trace.isChecked() if hasattr(self, 'chk_crawl_trace') else True,
             'output_dir':   self.inp_output.text().strip(),
             'dl_dir':       self.inp_dl_dir.text().strip(),
         }
@@ -10628,6 +10897,8 @@ class MainWindow(QMainWindow):
             if k in cfg: w.setValue(cfg[k])
         if 'headless' in cfg: self.chk_headless.setChecked(cfg['headless'])
         if 'resume'   in cfg: self.chk_resume.setChecked(cfg['resume'])
+        if 'crawl_trace_on_failure' in cfg and hasattr(self, 'chk_crawl_trace'):
+            self.chk_crawl_trace.setChecked(bool(cfg['crawl_trace_on_failure']))
         if 'fn_template' in cfg and hasattr(self, 'inp_fn_template'):
             self.inp_fn_template.setText(cfg['fn_template'])
             if hasattr(self, '_update_fn_preview'): self._update_fn_preview()

@@ -97,13 +97,6 @@ Roadmap for Stock Video Collector - a PyQt6 + Playwright desktop tool that crawl
   Acceptance: Each built-in site has an importable extractor/profile module with URL-match, ID extraction, catalog fixture, and video URL filter tests.
   Complexity: L
 
-- [ ] P1 - Add per-site crawl trace and replay diagnostics
-  Why: Broken selectors and network drift need reproducible evidence without rerunning broad live crawls.
-  Evidence: Playwright trace/HAR features, current log-only crawler diagnostics in `CrawlerWorker`.
-  Touches: `CrawlerWorker`, log panel, output directory layout, redaction helper, test fixture loader.
-  Acceptance: A failed crawl can save a redacted trace/HAR/HTML snapshot bundle and replay extractor tests against saved fixtures.
-  Complexity: M
-
 - [ ] P1 - Add accessibility pass for controls, status, and media cards
   Why: Dense PyQt controls and icon/text buttons need accessible names, focus order, non-color-only states, and screen-reader-friendly status updates.
   Evidence: `MainWindow._build_*` methods, Eagle/Bridge media-library UX expectations, PyQt6 accessibility APIs.
