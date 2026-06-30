@@ -80,12 +80,21 @@ import secrets as _secrets
 
 APP_NAME = "Stock Video Collector"
 APP_PACKAGE_NAME = "Stock-Video-Collector"
-APP_VERSION = "0.7.12"
+APP_VERSION = "0.7.13"
 APP_WINDOW_TITLE = f"{APP_NAME}  v{APP_VERSION}"
 APP_CONFIG_DIR_NAME = "StockVideoCollector"
 LEGACY_APP_CONFIG_DIR_NAME = "ArtlistScraper"
 SECRET_KEYRING_SERVICE = APP_PACKAGE_NAME
 DISABLE_KEYRING_ENV = "STOCK_VIDEO_COLLECTOR_DISABLE_KEYRING"
+
+PROVENANCE_FIELDS = (
+    'license_name',
+    'license_url',
+    'attribution_required',
+    'attribution_text',
+    'terms_url',
+    'preview_status',
+)
 
 
 def _branding_icon_path() -> Path:
@@ -905,11 +914,18 @@ class DB:
                           ('user_notes',  'TEXT DEFAULT ""'),
                           ('user_tags',   'TEXT DEFAULT ""'),
                           ('favorited',   'INTEGER DEFAULT 0'),
-                          ('source_site', 'TEXT DEFAULT ""')]:
+                          ('source_site', 'TEXT DEFAULT ""'),
+                          ('license_name', 'TEXT DEFAULT ""'),
+                          ('license_url', 'TEXT DEFAULT ""'),
+                          ('attribution_required', 'TEXT DEFAULT ""'),
+                          ('attribution_text', 'TEXT DEFAULT ""'),
+                          ('terms_url', 'TEXT DEFAULT ""'),
+                          ('preview_status', 'TEXT DEFAULT ""')]:
             try:
                 self.conn.execute(f"ALTER TABLE clips ADD COLUMN {col} {defn}")
             except sqlite3.OperationalError:
                 pass  # Column already exists
+        self._backfill_provenance_defaults()
         # Migrate queue tables: add profile column if upgrading from older DB
         for tbl in ('crawl_queue', 'crawled_pages'):
             try:
@@ -975,6 +991,39 @@ class DB:
                     print(f"[DB] Startup FTS rebuild complete: {count} rows indexed")
                 except Exception as rebuild_err:
                     print(f"[DB ERROR] Startup FTS rebuild failed: {rebuild_err}")
+
+    def _backfill_provenance_defaults(self):
+        provider = globals().get('_source_provenance_defaults')
+        if not callable(provider):
+            return
+        try:
+            rows = self.conn.execute(
+                "SELECT clip_id, source_site, license_name, license_url, "
+                "attribution_required, attribution_text, terms_url, preview_status "
+                "FROM clips WHERE source_site IS NOT NULL AND source_site != ''"
+            ).fetchall()
+            changed = 0
+            for row in rows:
+                defaults = provider(row['source_site'])
+                if not defaults:
+                    continue
+                sets, vals = [], []
+                for field in PROVENANCE_FIELDS:
+                    value = str(defaults.get(field, '') or '').strip()
+                    if value and not str(row[field] or '').strip():
+                        sets.append(f"{field}=?")
+                        vals.append(value)
+                if sets:
+                    vals.append(row['clip_id'])
+                    self.conn.execute(
+                        f"UPDATE clips SET {', '.join(sets)} WHERE clip_id=?",
+                        vals,
+                    )
+                    changed += 1
+            if changed:
+                self.conn.commit()
+        except Exception as e:
+            print(f"[DB WARN] provenance backfill skipped: {e}")
 
     def execute(self, sql, params=()):
         with self._lock:
@@ -1069,13 +1118,15 @@ class DB:
 
     def save_clip(self, data: dict) -> bool:
         """Insert clip with full metadata. Returns True if new row."""
+        data = _apply_source_provenance_defaults(data or {})
         try:
             with self._lock:
                 cur = self.conn.execute("""
                     INSERT OR IGNORE INTO clips
                     (clip_id,source_url,title,creator,collection,resolution,
-                     duration,frame_rate,camera,formats,tags,m3u8_url,thumbnail_url,source_site)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     duration,frame_rate,camera,formats,tags,m3u8_url,thumbnail_url,source_site,
+                     license_name,license_url,attribution_required,attribution_text,terms_url,preview_status)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (
                     str(data.get('clip_id','') or ''),
                     str(data.get('source_url','') or ''),
@@ -1091,6 +1142,12 @@ class DB:
                     str(data.get('m3u8_url','') or ''),
                     str(data.get('thumbnail_url','') or ''),
                     str(data.get('source_site','') or ''),
+                    str(data.get('license_name','') or ''),
+                    str(data.get('license_url','') or ''),
+                    str(data.get('attribution_required','') or ''),
+                    str(data.get('attribution_text','') or ''),
+                    str(data.get('terms_url','') or ''),
+                    str(data.get('preview_status','') or ''),
                 ))
                 is_new = cur.rowcount > 0
                 self.conn.commit()
@@ -1185,12 +1242,17 @@ class DB:
         Most fields: only fill if currently empty.
         resolution/formats/m3u8_url: upgrade if new value is higher quality.
         """
+        data = _apply_source_provenance_defaults(data or {})
         _ALLOWED_META_FIELDS = frozenset({
             'title','creator','collection','resolution','duration',
-            'frame_rate','camera','formats','tags','thumbnail_url','m3u8_url'
+            'frame_rate','camera','formats','tags','thumbnail_url','m3u8_url',
+            'license_name','license_url','attribution_required',
+            'attribution_text','terms_url','preview_status'
         })
         fields = ['title','creator','collection','resolution','duration',
-                  'frame_rate','camera','formats','tags','thumbnail_url','m3u8_url']
+                  'frame_rate','camera','formats','tags','thumbnail_url','m3u8_url',
+                  'license_name','license_url','attribution_required',
+                  'attribution_text','terms_url','preview_status']
         # Fields that can be upgraded (not just fill-empty)
         upgrade_fields = {'resolution', 'formats', 'frame_rate'}
         sets, vals = [], []
@@ -1294,6 +1356,8 @@ class DB:
         'creator','collection','resolution','frame_rate','dl_status',
         'title','tags','camera','duration','formats','clip_id',
         'user_rating','user_tags','favorited','source_site',
+        'license_name','license_url','attribution_required',
+        'attribution_text','terms_url','preview_status',
     })
 
     def distinct_values(self, col):
@@ -2113,6 +2177,7 @@ class SiteProfile:
         og_fallback       Use OpenGraph meta tags as metadata fallback
         jsonld_fallback   Try JSON-LD structured data
         custom_js         Extra JS to inject on pages (e.g. to trigger players)
+        license_*         Default source license and attribution provenance
     """
 
     # Built-in profile registry
@@ -2141,6 +2206,8 @@ class SiteProfile:
         self.video_cdn_domain   = kw.get('video_cdn_domain', '')
         # Catalog card extraction: JS that returns [{clip_id, title, creator, duration, thumbnail_url, source_url}]
         self.catalog_card_js    = kw.get('catalog_card_js', '')
+        for field in PROVENANCE_FIELDS:
+            setattr(self, field, kw.get(field, ''))
 
     def is_allowed_domain(self, domain):
         if not self.domains:
@@ -2195,6 +2262,13 @@ class SiteProfile:
     def to_dict(self):
         return {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
 
+    def provenance_defaults(self):
+        return {
+            field: str(getattr(self, field, '') or '').strip()
+            for field in PROVENANCE_FIELDS
+            if str(getattr(self, field, '') or '').strip()
+        }
+
     @classmethod
     def from_dict(cls, d):
         d = dict(d)  # Shallow copy to avoid mutating caller's dict
@@ -2225,6 +2299,11 @@ SiteProfile.register(SiteProfile(
     description='Artlist.io stock footage — M3U8 HLS streams',
     domains=['artlist.io'],
     start_url='https://artlist.io/stock-footage/',
+    license_name='Artlist license',
+    license_url='https://artlist.io/license',
+    attribution_required='Per subscription license',
+    terms_url='https://artlist.io/license',
+    preview_status='Licensed stream',
     catalog_patterns=['/stock-footage'],
     item_patterns=['/stock-footage/'],
     exclude_patterns=[
@@ -2394,6 +2473,11 @@ SiteProfile.register(SiteProfile(
     description='Pexels.com free stock videos — direct MP4 downloads (SD/HD/UHD)',
     domains=['pexels.com', 'www.pexels.com'],
     start_url='https://www.pexels.com/videos/',
+    license_name='Pexels License',
+    license_url='https://www.pexels.com/license/',
+    attribution_required='No',
+    terms_url='https://www.pexels.com/license/',
+    preview_status='Direct MP4',
     catalog_patterns=['/videos/', '/search/videos/', '/collections/'],
     item_patterns=['/video/'],
     exclude_patterns=[
@@ -2420,6 +2504,11 @@ SiteProfile.register(SiteProfile(
     description='Pixabay.com free stock videos',
     domains=['pixabay.com', 'www.pixabay.com'],
     start_url='https://pixabay.com/videos/',
+    license_name='Pixabay Content License',
+    license_url='https://pixabay.com/service/license-summary/',
+    attribution_required='No',
+    terms_url='https://pixabay.com/service/license-summary/',
+    preview_status='Direct preview',
     catalog_patterns=['/videos/'],
     item_patterns=['/videos/'],
     item_url_regex=r'/videos/[^/]+-\d+/?$',
@@ -2434,6 +2523,11 @@ SiteProfile.register(SiteProfile(
     description='Storyblocks.com stock video — HLS streams',
     domains=['storyblocks.com', 'www.storyblocks.com'],
     start_url='https://www.storyblocks.com/video/',
+    license_name='Storyblocks license',
+    license_url='https://www.storyblocks.com/license',
+    attribution_required='Per subscription license',
+    terms_url='https://www.storyblocks.com/license',
+    preview_status='Preview stream',
     catalog_patterns=['/video/'],
     item_patterns=['/video/stock/'],
     item_url_regex=r'/video/stock/.+',
@@ -2448,6 +2542,11 @@ SiteProfile.register(SiteProfile(
     description='Adobe Stock Video public watermarked previews -- MP4/HLS capture',
     domains=['stock.adobe.com', 'www.stock.adobe.com'],
     start_url='https://stock.adobe.com/video',
+    license_name='Adobe Stock license terms',
+    license_url='https://stock.adobe.com/license-terms',
+    attribution_required='Per license',
+    terms_url='https://stock.adobe.com/license-terms',
+    preview_status='Watermarked preview',
     catalog_patterns=['/video', '/search/video', '/collections/', '/free/'],
     item_patterns=['/video/'],
     exclude_patterns=[
@@ -2536,6 +2635,11 @@ SiteProfile.register(SiteProfile(
     description='Shutterstock Video public previews -- MP4/HLS capture',
     domains=['shutterstock.com', 'www.shutterstock.com'],
     start_url='https://www.shutterstock.com/video',
+    license_name='Shutterstock license',
+    license_url='https://www.shutterstock.com/license',
+    attribution_required='Per license',
+    terms_url='https://www.shutterstock.com/license',
+    preview_status='Preview',
     catalog_patterns=['/video', '/video/search', '/search/'],
     item_patterns=['/video/clip-'],
     exclude_patterns=[
@@ -2609,6 +2713,11 @@ SiteProfile.register(SiteProfile(
     description='Envato Elements stock-video previews -- MP4/HLS capture',
     domains=['elements.envato.com'],
     start_url='https://elements.envato.com/stock-video',
+    license_name='Envato Elements License Terms',
+    license_url='https://elements.envato.com/license-terms',
+    attribution_required='Per subscription license',
+    terms_url='https://elements.envato.com/license-terms',
+    preview_status='Preview',
     catalog_patterns=['/stock-video', '/video-templates', '/search/stock-video'],
     item_patterns=['/stock-video', '/video-templates'],
     exclude_patterns=[
@@ -2683,6 +2792,11 @@ SiteProfile.register(SiteProfile(
     description='Motion Array stock-video previews -- MP4/HLS capture',
     domains=['motionarray.com', 'www.motionarray.com'],
     start_url='https://motionarray.com/stock-video/',
+    license_name='Motion Array license terms',
+    license_url='https://motionarray.com/license/terms/',
+    attribution_required='Per subscription license',
+    terms_url='https://motionarray.com/license/terms/',
+    preview_status='Preview',
     catalog_patterns=['/stock-video', '/video-templates', '/motion-graphics'],
     item_patterns=['/stock-video/', '/video-templates/', '/motion-graphics/'],
     exclude_patterns=[
@@ -2756,6 +2870,11 @@ SiteProfile.register(SiteProfile(
     description='Vimeo public stock/CC channels -- HLS and progressive MP4 previews',
     domains=['vimeo.com', 'www.vimeo.com', 'player.vimeo.com'],
     start_url='https://vimeo.com/channels/freestockfootage',
+    license_name='Vimeo per-video license',
+    license_url='https://vimeo.com/creativecommons',
+    attribution_required='Per video license',
+    terms_url='https://vimeo.com/terms',
+    preview_status='Public preview',
     catalog_patterns=['/channels/', '/groups/', '/showcase/', '/album/', '/categories/'],
     item_patterns=['/video/', '/videos/'],
     exclude_patterns=[
@@ -2855,6 +2974,32 @@ SiteProfile.register(SiteProfile(
 ))
 
 # Convenience reference — kept for backward compat with existing code paths
+def _source_provenance_defaults(source_site):
+    source_site = str(source_site or '').strip()
+    if not source_site:
+        return {}
+    if source_site == 'Local Import':
+        return {
+            'license_name': 'Local file',
+            'attribution_required': 'Unknown',
+            'preview_status': 'Local file',
+        }
+    profile = SiteProfile.get(source_site)
+    if not profile:
+        return {}
+    return profile.provenance_defaults()
+
+
+def _apply_source_provenance_defaults(data):
+    enriched = dict(data or {})
+    defaults = _source_provenance_defaults(enriched.get('source_site', ''))
+    for field in PROVENANCE_FIELDS:
+        value = str(defaults.get(field, '') or '').strip()
+        if value and not str(enriched.get(field, '') or '').strip():
+            enriched[field] = value
+    return enriched
+
+
 M3U8_RE = VIDEO_PATTERNS['m3u8']
 
 
@@ -7356,6 +7501,12 @@ class DownloadWorker(QThread):
             'm3u8_url':     _g('m3u8_url'),
             'source_url':   _g('source_url'),
             'source_site':  _g('source_site'),
+            'license_name': _g('license_name'),
+            'license_url':  _g('license_url'),
+            'attribution_required': _g('attribution_required'),
+            'attribution_text': _g('attribution_text'),
+            'terms_url':    _g('terms_url'),
+            'preview_status': _g('preview_status'),
             'local_path':   mp4_path,
             'downloaded_at': datetime.now().isoformat(),
         }
@@ -8495,6 +8646,11 @@ class MainWindow(QMainWindow):
             ('FPS',        _g('frame_rate'), C('accent')),
             ('Camera',     _g('camera'),     C('text')),
             ('Formats',    _g('formats'),    C('text')),
+            ('Source',     _g('source_site'), C('text_muted')),
+            ('License',    _g('license_name'), C('warning')),
+            ('Attribution', _g('attribution_required'), C('text')),
+            ('Terms',      _g('terms_url') or _g('license_url'), C('accent_hover')),
+            ('Preview',    _g('preview_status'), C('border_light')),
             ('Status',     ('\u2713 Downloaded' if has_local else ('\u2717 Error' if _g('dl_status')=='error' else '\u2014')),
                           C('success') if has_local else (C('error') if _g('dl_status')=='error' else C('border_light'))),
             ('Clip ID',    clip_id,          C('text_muted')),
@@ -10044,7 +10200,9 @@ class MainWindow(QMainWindow):
             fname = f"video-metadata-filtered-{self._ts()}.csv" if filtered else f"video-metadata-{self._ts()}.csv"
             f = os.path.join(self._out_dir(), fname)
             fields = ['clip_id','title','creator','collection','tags','resolution',
-                      'duration','frame_rate','camera','formats','m3u8_url','source_url','found_at']
+                      'duration','frame_rate','camera','formats','m3u8_url','source_url',
+                      'source_site','license_name','license_url','attribution_required',
+                      'attribution_text','terms_url','preview_status','found_at']
             with open(f,'w',newline='',encoding='utf-8') as fh:
                 wr = csv.DictWriter(fh, fieldnames=fields, extrasaction='ignore')
                 wr.writeheader()

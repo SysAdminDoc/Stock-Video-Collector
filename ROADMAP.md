@@ -104,13 +104,6 @@ Roadmap for Stock Video Collector - a PyQt6 + Playwright desktop tool that crawl
   Acceptance: A failed crawl can save a redacted trace/HAR/HTML snapshot bundle and replay extractor tests against saved fixtures.
   Complexity: M
 
-- [ ] P1 - Add license and attribution provenance fields
-  Why: Stock footage libraries need source license, attribution, preview/watermark status, and terms URL to prevent misuse during export/handoff.
-  Evidence: Pexels/Pixabay/Vimeo/Adobe Stock docs, README export workflow, current `clips` schema.
-  Touches: `DB._init`, `save_clip`, profile/API metadata extraction, detail panel, CSV/JSON/sidecar exports.
-  Acceptance: New clips record license/provenance where available, UI exposes it, and exports include attribution/terms fields.
-  Complexity: M
-
 - [ ] P1 - Add accessibility pass for controls, status, and media cards
   Why: Dense PyQt controls and icon/text buttons need accessible names, focus order, non-color-only states, and screen-reader-friendly status updates.
   Evidence: `MainWindow._build_*` methods, Eagle/Bridge media-library UX expectations, PyQt6 accessibility APIs.

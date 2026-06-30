@@ -2,6 +2,13 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.7.13] - 2026-06-30
+
+- Added: Clip license/provenance columns for source license name, license URL, attribution requirement/text, terms URL, and preview/watermark status.
+- Added: Built-in site profile defaults for known source license/terms pages, with explicit crawler/import metadata preserved when present.
+- Changed: Detail panel, CSV exports, and download sidecar JSON now include license/provenance fields.
+- Added: Provenance schema/default/export tests covering profile defaults and explicit-value preservation.
+
 ## [v0.7.12] - 2026-06-30
 
 - Changed: Sensitive config values now store in the OS keyring when available, with the existing encrypted local vault as a logged fallback.
