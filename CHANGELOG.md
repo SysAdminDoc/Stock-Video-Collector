@@ -2,6 +2,12 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.7.16] - 2026-06-30
+
+- Changed: Built-in site profile definitions now live in importable `profiles/` modules instead of the main GUI/crawler file.
+- Added: Profile module contract fixtures and tests covering URL matching, clip ID extraction, registration, and video URL filters for every built-in profile.
+- Added: `SiteProfile.accepts_video_url()` and `SiteProfile.extract_clip_id()` helpers for shared extractor contract behavior.
+
 ## [v0.7.15] - 2026-06-30
 
 - Added: Accessible names/descriptions for major controls, status surfaces, media cards, toasts, and library selection controls.

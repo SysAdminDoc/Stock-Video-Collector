@@ -1,6 +1,6 @@
 # Stock Video Collector
 
-![Version](https://img.shields.io/badge/version-0.7.15-blue)
+![Version](https://img.shields.io/badge/version-0.7.16-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white)
 ![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?logo=qt&logoColor=white)
 ![Playwright](https://img.shields.io/badge/Playwright-Headless_Browser-2EAD33?logo=playwright&logoColor=white)
@@ -275,4 +275,4 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 ## Contributing
 
-Issues and PRs welcome. If you add support for a new site, submit it as a `SiteProfile.register()` block with documented selectors and test URLs.
+Issues and PRs welcome. If you add support for a new site, add a module under `profiles/` with a `build(SiteProfile)` factory and `CONTRACT` fixtures for URL matching, clip IDs, and video URL filtering.

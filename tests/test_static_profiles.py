@@ -1,4 +1,3 @@
-import ast
 import py_compile
 import re
 import unittest
@@ -9,30 +8,19 @@ ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "artlist_scraper.py"
 
 
-def _profile_constructor(profile_name):
-    tree = ast.parse(APP.read_text(encoding="utf-8"), filename=str(APP))
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        if not isinstance(func, ast.Attribute) or func.attr != "register":
-            continue
-        if not node.args or not isinstance(node.args[0], ast.Call):
-            continue
-        constructor = node.args[0]
-        if not constructor.args:
-            continue
-        name = ast.literal_eval(constructor.args[0])
-        if name == profile_name:
-            return constructor
-    raise AssertionError(f"{profile_name} profile registration not found")
+def _profile(profile_name):
+    import artlist_scraper as app
+
+    profile = app.SiteProfile.get(profile_name)
+    if not profile:
+        raise AssertionError(f"{profile_name} profile registration not found")
+    return profile
 
 
-def _kw(constructor, name):
-    for keyword in constructor.keywords:
-        if keyword.arg == name:
-            return ast.literal_eval(keyword.value)
-    raise AssertionError(f"{name} keyword not found")
+def _kw(profile, name):
+    if not hasattr(profile, name):
+        raise AssertionError(f"{name} attribute not found")
+    return getattr(profile, name)
 
 
 class StaticSourceTests(unittest.TestCase):
@@ -64,7 +52,7 @@ class CrawlModeAvailabilityTests(unittest.TestCase):
 
 class VimeoProfileTests(unittest.TestCase):
     def test_vimeo_profile_covers_public_video_pages(self):
-        profile = _profile_constructor("Vimeo")
+        profile = _profile("Vimeo")
 
         self.assertEqual(
             _kw(profile, "start_url"),
@@ -90,7 +78,7 @@ class VimeoProfileTests(unittest.TestCase):
         self.assertIsNone(item_re.search("https://vimeo.com/pricing"))
 
     def test_vimeo_catalog_extractor_keeps_hls_and_progressive_targets(self):
-        profile = _profile_constructor("Vimeo")
+        profile = _profile("Vimeo")
         extractor_js = _kw(profile, "catalog_card_js")
 
         self.assertIn(r"vimeo\.com", extractor_js)
@@ -101,7 +89,7 @@ class VimeoProfileTests(unittest.TestCase):
 
 class AdobeStockProfileTests(unittest.TestCase):
     def test_adobe_stock_profile_covers_asset_pages(self):
-        profile = _profile_constructor("Adobe Stock")
+        profile = _profile("Adobe Stock")
 
         self.assertEqual(_kw(profile, "start_url"), "https://stock.adobe.com/video")
         self.assertEqual(
@@ -126,7 +114,7 @@ class AdobeStockProfileTests(unittest.TestCase):
         self.assertIsNone(item_re.search("https://stock.adobe.com/photos/sample/123456789"))
 
     def test_adobe_catalog_extractor_records_watermarked_preview_metadata(self):
-        profile = _profile_constructor("Adobe Stock")
+        profile = _profile("Adobe Stock")
         extractor_js = _kw(profile, "catalog_card_js")
 
         self.assertIn(r"stock\.adobe\.com", extractor_js)
@@ -137,7 +125,7 @@ class AdobeStockProfileTests(unittest.TestCase):
 
 class PreviewMarketplaceProfileTests(unittest.TestCase):
     def test_shutterstock_profile_covers_video_clip_pages(self):
-        profile = _profile_constructor("Shutterstock")
+        profile = _profile("Shutterstock")
         item_re = re.compile(_kw(profile, "item_url_regex"))
         id_re = re.compile(_kw(profile, "clip_id_regex"))
 
@@ -149,7 +137,7 @@ class PreviewMarketplaceProfileTests(unittest.TestCase):
         self.assertIn("Preview", _kw(profile, "catalog_card_js"))
 
     def test_envato_elements_profile_covers_stock_video_items(self):
-        profile = _profile_constructor("Envato Elements")
+        profile = _profile("Envato Elements")
         item_re = re.compile(_kw(profile, "item_url_regex"), re.IGNORECASE)
         id_re = re.compile(_kw(profile, "clip_id_regex"), re.IGNORECASE)
 
@@ -161,7 +149,7 @@ class PreviewMarketplaceProfileTests(unittest.TestCase):
         self.assertIn("Preview", _kw(profile, "catalog_card_js"))
 
     def test_motion_array_profile_covers_stock_video_items(self):
-        profile = _profile_constructor("Motion Array")
+        profile = _profile("Motion Array")
         item_re = re.compile(_kw(profile, "item_url_regex"))
         id_re = re.compile(_kw(profile, "clip_id_regex"))
 
