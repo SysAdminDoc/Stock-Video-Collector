@@ -2,6 +2,10 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.7.18] - 2026-06-30
+
+- Added: Expanded local workflow tests for legacy DB migration with FTS rebuild, export file outputs, download preflight failures, and local import metadata persistence.
+
 ## [v0.7.17] - 2026-06-30
 
 - Added: Optional official API connector layer for Pexels, Pixabay, Vimeo, and Adobe Stock, using configured keys before falling back to browser crawling.

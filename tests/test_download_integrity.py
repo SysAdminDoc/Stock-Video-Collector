@@ -127,6 +127,32 @@ class DownloadIntegrityHelperTests(unittest.TestCase):
 
 
 class DownloadWorkerIntegrationTests(unittest.TestCase):
+    def test_download_one_classifies_404_preflight_as_permanent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            row = {
+                "clip_id": "missing404",
+                "title": "Missing",
+                "m3u8_url": "https://cdn.example.test/missing.mp4",
+                "duration": "00:01",
+                "creator": "",
+                "collection": "",
+                "resolution": "",
+                "frame_rate": "",
+                "camera": "",
+                "formats": "",
+                "source_url": "https://example.test/missing",
+                "source_site": "test",
+                "tags": "",
+            }
+            db = _DownloadDB(row)
+            worker = app.DownloadWorker(str(Path(tmp) / "out"), db, max_concurrent=1, max_retries=0)
+            worker._head_check_url = lambda url, timeout=8: (False, "HTTP 404")
+
+            result = worker._download_one(row, "ffmpeg")
+
+            self.assertEqual(result, "permanent")
+            self.assertFalse(db.local_updates)
+
     def test_download_one_promotes_valid_part_file_atomically(self):
         ffmpeg = app._get_ffmpeg()
         with tempfile.TemporaryDirectory() as tmp:
