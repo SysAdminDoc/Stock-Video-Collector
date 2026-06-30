@@ -1,6 +1,6 @@
 # Stock Video Collector
 
-![Version](https://img.shields.io/badge/version-0.7.14-blue)
+![Version](https://img.shields.io/badge/version-0.7.15-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white)
 ![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?logo=qt&logoColor=white)
 ![Playwright](https://img.shields.io/badge/Playwright-Headless_Browser-2EAD33?logo=playwright&logoColor=white)
@@ -166,14 +166,7 @@ The crawler uses four complementary strategies to find video URLs on every page:
 | Toast notifications | Non-blocking status notifications |
 | Live crawl log | Real-time scrolling log with verbose/quiet toggle |
 | Clipboard monitor | Opt-in URL detection from clipboard (auto-fills crawl URL input) |
-
-### Keyboard Shortcuts
-
-| Key | Action |
-|-----|--------|
-| `Ctrl+F` | Focus search bar |
-| `F5` | Refresh search results |
-| `Ctrl+1` through `Ctrl+6` | Switch between tabs |
+| Accessibility metadata | Major controls, status surfaces, and media cards expose accessible names/descriptions |
 
 ---
 

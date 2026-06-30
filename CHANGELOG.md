@@ -2,6 +2,13 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.7.15] - 2026-06-30
+
+- Added: Accessible names/descriptions for major controls, status surfaces, media cards, toasts, and library selection controls.
+- Changed: Media card download state is shown as a compact text badge instead of a color-only status dot.
+- Changed: Hidden keyboard shortcut bindings and README shortcut docs were removed; Select Visible and Clear Selection are available as visible Search tab actions.
+- Fixed: Select-all now targets the Search tab correctly.
+
 ## [v0.7.14] - 2026-06-30
 
 - Added: Browser crawl failures now save redacted diagnostics bundles with Playwright trace, HTML snapshot, screenshot, metadata, and HAR-style network log.

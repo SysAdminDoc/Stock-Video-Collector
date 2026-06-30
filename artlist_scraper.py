@@ -4,7 +4,7 @@
 # Phase 1-3: Search quality, thumbnail pipeline, card/grid view
 # Phase 4-6: Detail panel, archive management, collections, stats, filename templates
 # v0.2.1: Bug fixes, performance optimizations, WAL mode, bounded logs, debounced UI
-# v0.3.0: Context menus, keyboard shortcuts, system tray, concurrent downloads,
+# v0.3.0: Context menus, visible actions, system tray, concurrent downloads,
 #          retry with backoff, download speed+ETA, clipboard monitor, toast notifications
 # v0.6.1: Pexels profile hardened (Canva HD/UHD MP4 extraction, OG metadata
 #          parsing, URL slug titles, Load More pagination, CDN domain filter),
@@ -52,16 +52,16 @@
 #          extraction falls back to href for clip ID, metadata selectors
 #          now handle newlines between label and value
 # v1.0.0: UI scaling system -- zoom controls (75%-200%) in header bar,
-#          Ctrl+=/Ctrl+-/Ctrl+0 shortcuts, full UI rebuild on zoom change,
+#          full UI rebuild on zoom change,
 #          all setFixedHeight/Width/Size + inline font-sizes use Z() scaling,
 #          _build_stylesheet(scale) replaces static DARK_STYLE, zoom persists.
 #          Power improvements -- concurrent downloads up to 32 (default 4),
 #          retries up to 25, batch size up to 5000, max depth 25, lower
 #          minimum delays (200ms page / 50ms scroll / 500ms M3U8), scroll
 #          steps up to 200, bandwidth limit up to 500 MB/s.
-# v1.1.0: Multi-select cards (Ctrl+click toggle, Shift+click range), bulk
+# v1.1.0: Multi-select cards (modifier-click toggle, range selection), bulk
 #          context menu ops (rate/fav/collect/download N clips at once),
-#          Ctrl+A select all / Escape deselect, selection count in status.
+#          visible select/deselect controls, selection count in status.
 #          Disk space check before downloads (500 MB minimum free).
 #          Export current search results (filtered TXT/JSON/M3U/CSV).
 #          Lazy batch thumbnail loading (30/frame) prevents UI freeze.
@@ -81,7 +81,7 @@ import secrets as _secrets
 
 APP_NAME = "Stock Video Collector"
 APP_PACKAGE_NAME = "Stock-Video-Collector"
-APP_VERSION = "0.7.14"
+APP_VERSION = "0.7.15"
 APP_WINDOW_TITLE = f"{APP_NAME}  v{APP_VERSION}"
 APP_CONFIG_DIR_NAME = "StockVideoCollector"
 LEGACY_APP_CONFIG_DIR_NAME = "ArtlistScraper"
@@ -420,7 +420,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QColor, QTextCursor, QPixmap, QPainter, QBrush, QFont,
-    QKeySequence, QShortcut, QAction, QIcon
+    QAction, QIcon
 )
 
 # Optional: in-app video preview (requires PyQt6-Multimedia)
@@ -458,6 +458,27 @@ def S(px):
     hardcoded sizes need to respect high-DPI screens.
     """
     return max(1, int(px * _dpi_factor))
+
+
+def _plain_accessibility_text(text):
+    """Return compact control text without decorative symbols."""
+    text = str(text or '').replace('&', ' ')
+    text = re.sub(r'[^\w\s:/.,()\'"+-]+', ' ', text, flags=re.UNICODE)
+    return re.sub(r'\s+', ' ', text).strip(" -")
+
+
+def _set_accessible(widget, name, description=None):
+    """Assign accessible metadata when the Qt object supports it."""
+    name = _plain_accessibility_text(name)
+    description = _plain_accessibility_text(description or name)
+    if not widget or not name:
+        return widget
+    try:
+        widget.setAccessibleName(name)
+        widget.setAccessibleDescription(description or name)
+    except Exception:
+        pass
+    return widget
 
 
 # Global UI zoom level (1.0 = 100%)
@@ -6576,6 +6597,7 @@ class ClipCard(QFrame):
         self.setFixedWidth(cw)
         self.setObjectName('clip-card')
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
 
         vlay = QVBoxLayout(self)
@@ -6618,7 +6640,7 @@ class ClipCard(QFrame):
             cl.setToolTip(creator)
             clay.addWidget(cl)
 
-        # Badges row: resolution | duration | fps | fav heart | rating | status dot
+        # Badges row: resolution | duration | fps | fav heart | rating | status
         badges = QHBoxLayout(); badges.setSpacing(Z(3)); badges.setContentsMargins(0,Z(3),0,0)
         # Favorite heart
         if self._favorited:
@@ -6641,11 +6663,18 @@ class ClipCard(QFrame):
             stars.setStyleSheet(f"color:{C('warning')}; font-size:{Z(8)}px; background:transparent;")
             badges.addWidget(stars)
         ds = self._dl_status
-        dot_clr = {'done':C('success'),'downloading':C('warning'),'error':C('error')}.get(ds,C('border'))
-        dot = QLabel('●')
-        dot.setStyleSheet(f"color:{dot_clr}; font-size:{Z(10)}px; background:transparent;")
-        dot.setToolTip({'done':'Downloaded','downloading':'Downloading...','error':'Error','':''}.get(ds,''))
-        badges.addWidget(dot)
+        status_text, status_tip, status_clr = {
+            'done': ('Done', 'Downloaded', C('success')),
+            'downloading': ('Busy', 'Downloading', C('warning')),
+            'error': ('Error', 'Download error', C('error')),
+        }.get(ds, ('New', 'Not downloaded', C('border_light')))
+        status_badge = QLabel(status_text)
+        status_badge.setStyleSheet(
+            f"background:{status_clr}22; color:{status_clr}; font-size:{Z(8)}px; "
+            f"font-weight:700; padding:{Z(1)}px {Z(5)}px; border-radius:{Z(3)}px;")
+        status_badge.setToolTip(status_tip)
+        _set_accessible(status_badge, f"Download status {status_text}", status_tip)
+        badges.addWidget(status_badge)
         clay.addLayout(badges)
 
         # Tag chips (first 5 tags)
@@ -6673,6 +6702,29 @@ class ClipCard(QFrame):
             candidate = os.path.join(thumb_dir, f"{self._clip_id}.jpg")
             if os.path.isfile(candidate):
                 self._pending_thumb = candidate
+        self._refresh_accessibility()
+
+    def _refresh_accessibility(self):
+        """Keep card metadata readable to assistive technology."""
+        title = self._get_field(self._row, 'title') or self._clip_id or "Untitled clip"
+        source = self._get_field(self._row, 'source_site') or "unknown source"
+        bits = [
+            title,
+            f"source {source}",
+            f"status {self._dl_status or 'not downloaded'}",
+        ]
+        resolution = self._get_field(self._row, 'resolution')
+        duration = self._get_field(self._row, 'duration')
+        if resolution:
+            bits.append(f"resolution {resolution}")
+        if duration:
+            bits.append(f"duration {duration}")
+        if self._favorited:
+            bits.append("favorited")
+        if self._user_rating:
+            bits.append(f"rating {self._user_rating} of 5")
+        _set_accessible(self, f"Clip card {title}", ". ".join(bits))
+        _set_accessible(self.thumb_label, f"Thumbnail for {title}", "Clip thumbnail or placeholder preview")
 
     def load_deferred_thumb(self):
         """Load the thumbnail if it was deferred during construction."""
@@ -6714,6 +6766,7 @@ class ClipCard(QFrame):
 
     def update_dl_status(self, status):
         self._dl_status = status
+        self._refresh_accessibility()
 
     # ── Hover video preview ───────────────────────────────────────────────
 
@@ -7821,6 +7874,7 @@ class ToastNotification(QLabel):
             f"background:{bg}; color:{fg}; border:1px solid {fg}40; "
             f"border-radius:{Z(6)}px; padding:{Z(10)}px {Z(20)}px; font-size:{Z(12)}px; font-weight:600;")
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        _set_accessible(self, f"{level} notification", message)
         self.adjustSize()
         self.setFixedWidth(max(self.width() + Z(40), Z(300)))
         # Position: top-center of parent
@@ -7905,22 +7959,6 @@ class MainWindow(QMainWindow):
         self._clip_found_timer = QTimer()
         self._clip_found_timer.setSingleShot(True)
         self._clip_found_timer.timeout.connect(lambda: (self._do_search(), self._update_dl_stats()))
-
-        # ── Keyboard Shortcuts ──────────────────────────────────────────────
-        QShortcut(QKeySequence("Ctrl+F"), self, activated=self._focus_search)
-        QShortcut(QKeySequence("F5"), self, activated=self._do_search)
-        QShortcut(QKeySequence("Ctrl+1"), self, activated=lambda: self.tabs.setCurrentIndex(0))
-        QShortcut(QKeySequence("Ctrl+2"), self, activated=lambda: self.tabs.setCurrentIndex(1))
-        QShortcut(QKeySequence("Ctrl+3"), self, activated=lambda: self.tabs.setCurrentIndex(2))
-        QShortcut(QKeySequence("Ctrl+4"), self, activated=lambda: self.tabs.setCurrentIndex(3))
-        QShortcut(QKeySequence("Ctrl+5"), self, activated=lambda: self.tabs.setCurrentIndex(4))
-        QShortcut(QKeySequence("Ctrl+6"), self, activated=lambda: self.tabs.setCurrentIndex(5))
-        QShortcut(QKeySequence("Ctrl+="), self, activated=self._zoom_in)
-        QShortcut(QKeySequence("Ctrl++"), self, activated=self._zoom_in)
-        QShortcut(QKeySequence("Ctrl+-"), self, activated=self._zoom_out)
-        QShortcut(QKeySequence("Ctrl+0"), self, activated=self._zoom_reset)
-        QShortcut(QKeySequence("Ctrl+A"), self, activated=self._select_all_cards)
-        QShortcut(QKeySequence("Escape"), self, activated=self._deselect_all_cards)
 
         # ── System Tray ─────────────────────────────────────────────────────
         self._setup_tray()
@@ -8017,14 +8055,6 @@ class MainWindow(QMainWindow):
                     self.inp_url.setText(text)
         except Exception:
             pass
-
-    # ── Keyboard Shortcut Helpers ───────────────────────────────────────────
-
-    def _focus_search(self):
-        """Ctrl+F — switch to search tab and focus the search input."""
-        self.tabs.setCurrentIndex(2)
-        self.inp_search.setFocus()
-        self.inp_search.selectAll()
 
     # ── Zoom System ────────────────────────────────────────────────────────
 
@@ -8137,6 +8167,7 @@ class MainWindow(QMainWindow):
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready  —  DB: " + self._db_path)
+        self._apply_accessibility_metadata()
 
     def _build_header(self):
         hdr = QFrame()
@@ -8213,6 +8244,173 @@ class MainWindow(QMainWindow):
         l = QLabel(text)
         l.setStyleSheet(f"font-size:{Z(12)}px; font-weight:600; background:transparent; color:{color};")
         return l
+
+    def _widget_has_accessible_name(self, widget):
+        try:
+            return bool(_plain_accessibility_text(widget.accessibleName()))
+        except Exception:
+            return False
+
+    def _infer_accessible_name(self, widget):
+        """Infer a useful accessible name from visible text or local metadata."""
+        try:
+            if isinstance(widget, (QPushButton, QCheckBox)):
+                return widget.text() or widget.toolTip()
+            if isinstance(widget, QGroupBox):
+                return widget.title()
+            if isinstance(widget, QLineEdit):
+                return widget.placeholderText() or widget.toolTip() or widget.objectName()
+            if isinstance(widget, QComboBox):
+                return widget.toolTip() or widget.objectName()
+            if isinstance(widget, QSpinBox):
+                return widget.toolTip() or widget.objectName()
+            if isinstance(widget, QSlider):
+                return widget.toolTip() or widget.objectName()
+            if isinstance(widget, QProgressBar):
+                return widget.format() or widget.objectName()
+            if isinstance(widget, QTableWidget):
+                return widget.objectName() or "Table"
+            if isinstance(widget, QTextEdit):
+                return widget.placeholderText() or widget.toolTip() or widget.objectName()
+            if isinstance(widget, QLabel):
+                text = widget.text()
+                return text if text and len(text) <= 120 else widget.toolTip()
+        except Exception:
+            return ''
+        return ''
+
+    def _apply_accessibility_metadata(self):
+        """Expose visible controls, state, and status surfaces to assistive tech."""
+        _set_accessible(self, APP_NAME, "Local stock video crawler, catalog, and download manager")
+        if hasattr(self, 'tabs'):
+            _set_accessible(self.tabs, "Primary navigation tabs", "Configure, Crawl, Search, Download, Archive, and Export")
+            for idx in range(self.tabs.count()):
+                label = self.tabs.tabText(idx)
+                widget = self.tabs.widget(idx)
+                _set_accessible(widget, f"{label} tab", f"{label} workspace")
+
+        explicit = {
+            '_zoom_combo': ("Zoom selector", "Adjusts the interface scale"),
+            '_theme_combo': ("Theme selector", "Changes the interface color theme"),
+            'status_bar': ("Application status", "Shows current application state and recovery messages"),
+            'lbl_clips_hdr': ("Total clips status", "Header count of clips in the catalog"),
+            'lbl_m3u8_hdr': ("M3U8 clip status", "Header count of clips with stream URLs"),
+            'lbl_status_hdr': ("Crawler status", "Current crawler activity state"),
+            'inp_url': ("Start URL", "Catalog or search URL used by the selected crawl profiles"),
+            'spin_batch_size': ("Batch size per site", "Pages crawled per site before rotating profiles"),
+            'spin_page_delay': ("Page delay", "Delay between page loads in milliseconds"),
+            'spin_scroll_delay': ("Scroll delay", "Delay between scroll steps in milliseconds"),
+            'spin_m3u8_wait': ("M3U8 wait", "Dwell time after page load for stream discovery"),
+            'spin_scroll_steps': ("Scroll steps", "Scroll passes on catalog pages"),
+            'spin_timeout': ("Page timeout", "Maximum page load wait before skipping"),
+            'spin_max_pages': ("Maximum pages", "Stop after this many pages; zero means unlimited"),
+            'spin_max_depth': ("Maximum crawl depth", "Link-following depth from the start URL"),
+            'chk_headless': ("Headless mode", "Run the browser without a visible window"),
+            'chk_resume': ("Resume mode", "Skip pages already marked crawled"),
+            'chk_crawl_trace': ("Save failed-crawl diagnostics", "Save redacted trace bundles when browser crawls fail"),
+            'inp_output': ("Output directory", "Base folder for exports, thumbnails, and default downloads"),
+            'combo_crawl_mode': ("Crawl mode", "Chooses full crawl, catalog sweep, M3U8 harvest, API discovery, or direct HTTP"),
+            'progress_bar': ("Crawl progress", "Shows active crawl progress while indeterminate or running"),
+            'browser_banner': ("Browser readiness warning", "Shows when Chromium is missing for browser-required modes"),
+            'lbl_browser_status': ("Browser status message", "Explains the current Chromium setup state"),
+            'btn_install_browser': ("Install browser", "Installs Playwright Chromium for browser crawls"),
+            'btn_start': ("Start crawl", "Starts crawling with the selected profiles and mode"),
+            'btn_pause': ("Pause crawl", "Pauses or resumes the active crawl"),
+            'btn_stop': ("Stop crawl", "Stops the active crawl"),
+            'btn_restore_db': ("Restore last database backup", "Restores the newest pre-clear database backup"),
+            'chk_verbose_log': ("Verbose crawl log", "Shows debug-level crawl log messages"),
+            'log_view': ("Live crawl log", "Timestamped crawl and diagnostic messages"),
+            'inp_search': ("Library search", "Searches titles, tags, creators, collections, cameras, and resolutions"),
+            'btn_catalog': ("Catalog mode", "Toggles full-width browsing of all visible cards"),
+            'combo_sort': ("Sort results", "Sorts visible library cards"),
+            'combo_source': ("Source filter", "Filters clips by source site"),
+            'combo_creator': ("Creator filter", "Filters clips by creator"),
+            'combo_collection': ("Collection filter", "Filters clips by source collection"),
+            'combo_res': ("Resolution filter", "Filters clips by resolution"),
+            'combo_fps': ("Frame-rate filter", "Filters clips by frame rate"),
+            'combo_duration': ("Duration filter", "Filters clips by duration bucket"),
+            'combo_user_collection': ("User collection filter", "Filters clips by local collection"),
+            'chk_favorites': ("Favorites only", "Shows favorited clips only"),
+            'chk_downloaded': ("Downloaded only", "Shows downloaded clips only"),
+            'btn_search_mode': ("Search mode", "Toggles OR and AND search term matching"),
+            'spin_min_rating': ("Minimum rating", "Filters clips by minimum star rating"),
+            'combo_saved_search': ("Saved searches", "Loads a saved library search"),
+            'card_size_slider': ("Card size", "Adjusts library card thumbnail size"),
+            'btn_select_visible': ("Select visible clips", "Selects every visible library card"),
+            'btn_clear_selection': ("Clear selection", "Clears selected library cards"),
+            'lbl_result_count': ("Result and selection count", "Shows visible result count and selected clip count"),
+            'lbl_import_status': ("Import status", "Shows local folder import progress"),
+            'btn_import_folder': ("Import folder", "Scans a local folder for videos and catalogs them"),
+            'btn_fetch_thumbs': ("Fetch thumbnails", "Fetches or regenerates missing thumbnail images"),
+            '_detail_panel': ("Clip detail panel", "Shows metadata and actions for the selected clip"),
+            '_detail_close_btn': ("Close detail panel", "Hides the detail panel in catalog mode"),
+            '_preview_stack': ("Clip preview", "Shows the selected clip thumbnail or video preview"),
+            'detail_thumb': ("Detail thumbnail", "Thumbnail for the selected clip"),
+            'btn_preview_play': ("Preview play or pause", "Starts or pauses the selected clip preview"),
+            'btn_preview_stop': ("Preview stop", "Stops the selected clip preview"),
+            'preview_scrub': ("Preview scrubber", "Seeks within the selected clip preview"),
+            'detail_title': ("Selected clip title", "Title of the selected clip"),
+            'btn_detail_fav': ("Toggle favorite", "Marks or unmarks the selected clip as a favorite"),
+            'detail_notes': ("Clip notes", "Editable notes for the selected clip"),
+            'detail_user_tags': ("Clip user tags", "Comma-separated custom tags for the selected clip"),
+            'detail_coll_combo': ("Add to collection", "Adds the selected clip to a local collection"),
+            'btn_detail_play': ("Open selected file", "Opens the local media file or stream URL"),
+            'btn_detail_copy_m3u8': ("Copy stream URL", "Copies the selected clip M3U8 URL"),
+            'btn_detail_open_folder': ("Open containing folder", "Opens the selected clip location"),
+            'btn_detail_source': ("Open source page", "Opens the selected clip source page"),
+            'inp_scan_dir': ("Sidecar scan folder", "Folder containing JSON sidecars to import"),
+            'inp_fn_template': ("Filename template", "Template used for generated download filenames"),
+            'inp_dl_dir': ("Download directory", "Folder where MP4 files will be saved"),
+            'chk_auto_dl': ("Auto-download", "Automatically downloads clips as they are scraped"),
+            'spin_concurrent': ("Concurrent downloads", "Number of parallel download workers"),
+            'spin_max_retries': ("Maximum download retries", "Retry count for failed downloads"),
+            'spin_bw_limit': ("Download speed limit", "Maximum download speed in KB per second"),
+            'dl_overall_bar': ("Overall download progress", "Progress across queued downloads"),
+            'dl_item_bar': ("Current download progress", "Progress for the active download"),
+            'lbl_dl_current': ("Current download status", "Current item download status"),
+            'btn_dl_all': ("Download all with M3U8", "Queues every stream-backed clip for download"),
+            'btn_dl_new': ("Download new only", "Queues stream-backed clips that are not already downloaded"),
+            'btn_dl_sel': ("Download selected", "Queues the selected clip for download"),
+            'btn_dl_stop': ("Stop downloads", "Stops the download worker"),
+            'dl_table': ("Download queue table", "Queued downloads, status, progress, and file paths"),
+            'dl_log': ("Download log", "Timestamped download messages"),
+            'lbl_export_status': ("Export status", "Shows export progress and results"),
+        }
+        for attr, (name, description) in explicit.items():
+            widget = getattr(self, attr, None)
+            if widget is not None:
+                _set_accessible(widget, name, description)
+
+        for widget in self.findChildren(QWidget):
+            if self._widget_has_accessible_name(widget):
+                continue
+            name = self._infer_accessible_name(widget)
+            if name:
+                try:
+                    desc = widget.toolTip()
+                except Exception:
+                    desc = ''
+                _set_accessible(widget, name, desc or name)
+
+        self._apply_focus_order()
+
+    def _apply_focus_order(self):
+        order = [
+            'inp_url', 'combo_crawl_mode', 'btn_start', 'btn_pause', 'btn_stop',
+            'inp_search', 'combo_sort', 'combo_duration', 'combo_user_collection',
+            'btn_catalog', 'btn_select_visible', 'btn_clear_selection',
+            'btn_import_folder', 'btn_fetch_thumbs', 'detail_notes', 'detail_user_tags',
+            'detail_coll_combo', 'inp_dl_dir', 'spin_concurrent', 'spin_max_retries',
+            'spin_bw_limit', 'btn_dl_all', 'btn_dl_new', 'btn_dl_sel', 'inp_scan_dir',
+            'inp_fn_template',
+        ]
+        widgets = [getattr(self, name, None) for name in order]
+        widgets = [w for w in widgets if w is not None]
+        for first, second in zip(widgets, widgets[1:]):
+            try:
+                QWidget.setTabOrder(first, second)
+            except Exception:
+                pass
 
     # ── Config Tab ──────────────────────────────────────────────────────────
 
@@ -8609,6 +8807,16 @@ class MainWindow(QMainWindow):
         self.lbl_import_status = QLabel(""); self.lbl_import_status.setObjectName("subtext")
         brow.addWidget(self.lbl_import_status)
         brow.addStretch()
+        self.btn_select_visible = QPushButton("Select Visible")
+        self.btn_select_visible.setObjectName("neutral"); self.btn_select_visible.setFixedHeight(Z(30))
+        self.btn_select_visible.setToolTip("Select every clip currently visible in the library grid")
+        self.btn_select_visible.clicked.connect(self._select_all_cards)
+        brow.addWidget(self.btn_select_visible)
+        self.btn_clear_selection = QPushButton("Clear Selection")
+        self.btn_clear_selection.setObjectName("neutral"); self.btn_clear_selection.setFixedHeight(Z(30))
+        self.btn_clear_selection.setToolTip("Clear the current library card selection")
+        self.btn_clear_selection.clicked.connect(self._deselect_all_cards)
+        brow.addWidget(self.btn_clear_selection)
         self.btn_import_folder = QPushButton("Import Folder")
         self.btn_import_folder.setObjectName("warning"); self.btn_import_folder.setFixedHeight(Z(30))
         self.btn_import_folder.setToolTip("Scan a local folder for video files and add them to the catalog")
@@ -9033,7 +9241,7 @@ class MainWindow(QMainWindow):
             self._update_selection_label()
 
     def _select_all_cards(self):
-        if not hasattr(self, 'tabs') or self.tabs.currentIndex() != 1:
+        if not hasattr(self, 'tabs') or self.tabs.currentIndex() != 2:
             return
         self._deselect_all_cards()
         for card in self._current_cards:
@@ -9053,12 +9261,12 @@ class MainWindow(QMainWindow):
         self.lbl_result_count.setText(f"{n} clip{'s' if n!=1 else ''}{suffix}{sel_str}")
 
     def _on_card_clicked(self, row, card=None, modifiers=None):
-        """Show clip in detail panel. Supports Ctrl+click multi-select and Shift+click range."""
+        """Show clip in detail panel. Supports modifier-click multi-select and range selection."""
         if modifiers is None:
             modifiers = QApplication.keyboardModifiers()
         card_idx = self._current_cards.index(card) if card and card in self._current_cards else -1
 
-        # Ctrl+click: toggle card in multi-select
+        # Modifier-click: toggle card in multi-select.
         if modifiers & Qt.KeyboardModifier.ControlModifier and card:
             existing = [c for c, r in self._selected_cards if c is card]
             if existing:
@@ -9071,7 +9279,7 @@ class MainWindow(QMainWindow):
             self._update_selection_label()
             return
 
-        # Shift+click: range select
+        # Range-select with the standard selection modifier.
         if modifiers & Qt.KeyboardModifier.ShiftModifier and card and self._last_click_idx >= 0:
             start = min(self._last_click_idx, card_idx)
             end = max(self._last_click_idx, card_idx)
