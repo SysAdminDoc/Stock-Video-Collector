@@ -2,6 +2,11 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.7.9] - 2026-06-30
+
+- Added: Shared URL safety policy for app-initiated crawler, thumbnail, GraphQL, direct HTTP, and download preflight fetches to block localhost, private/link-local networks, metadata services, non-HTTP(S) schemes, ambiguous IP literals, and redirect-to-private targets.
+- Added: URL safety tests covering unsafe host rejection, sensitive-query redaction, DNS-to-private blocking, redirect blocking, and download HEAD preflight reporting.
+
 ## [v0.7.8] - 2026-06-28
 
 - Added: Sensitive config values are migrated out of plaintext `config.json` into an encrypted local vault with `__secret_ref__` pointers.

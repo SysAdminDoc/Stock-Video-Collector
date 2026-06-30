@@ -75,12 +75,12 @@ import multiprocessing
 multiprocessing.freeze_support()
 
 from pathlib import Path
-import sys, os, subprocess, traceback, re, random, shutil, base64, hashlib, hmac
+import sys, os, subprocess, traceback, re, random, shutil, base64, hashlib, hmac, ipaddress, socket
 import secrets as _secrets
 
 APP_NAME = "Stock Video Collector"
 APP_PACKAGE_NAME = "Stock-Video-Collector"
-APP_VERSION = "0.7.8"
+APP_VERSION = "0.7.9"
 APP_WINDOW_TITLE = f"{APP_NAME}  v{APP_VERSION}"
 
 
@@ -262,7 +262,129 @@ if __name__ == '__main__':
 
 import json, sqlite3, asyncio, threading
 from datetime import datetime
-from urllib.parse import urlparse, urlunparse, parse_qs, urlencode, unquote
+from urllib.parse import urlparse, urlunparse, parse_qs, urlencode, unquote, urljoin
+
+
+class UnsafeUrlError(ValueError):
+    """Raised when an app-initiated fetch targets a private or unsafe URL."""
+
+
+_ALLOWED_FETCH_SCHEMES = frozenset({"http", "https"})
+_BLOCKED_HOSTNAMES = frozenset({
+    "localhost",
+    "localhost.localdomain",
+    "metadata",
+    "metadata.google.internal",
+    "instance-data",
+})
+
+
+def _url_for_log(url):
+    return _redact_text(str(url or ""))[:500]
+
+
+def _request_url(req_or_url):
+    return str(getattr(req_or_url, "full_url", req_or_url) or "")
+
+
+def _host_looks_ambiguous(host):
+    h = str(host or "").strip().lower()
+    if not h:
+        return True
+    if "%" in h or "\\" in h or "/" in h:
+        return True
+    labels = h.split(".")
+    if all(label.isdigit() for label in labels):
+        return True
+    if h.startswith("0x") or any(label.startswith("0x") for label in labels):
+        return True
+    if any(len(label) > 1 and label.startswith("0") and label.isdigit() for label in labels):
+        return True
+    return False
+
+
+def _ip_is_unsafe(ip):
+    return (
+        ip.is_loopback
+        or ip.is_private
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+        or not ip.is_global
+    )
+
+
+def _host_is_unsafe(host, port=None):
+    raw_host = unquote(str(host or "")).strip().strip("[]").rstrip(".").lower()
+    if not raw_host:
+        return "missing host"
+    if raw_host in _BLOCKED_HOSTNAMES or raw_host.endswith(".localhost") or raw_host.endswith(".local"):
+        return "local hostname"
+
+    try:
+        ip = ipaddress.ip_address(raw_host)
+    except ValueError:
+        if _host_looks_ambiguous(raw_host):
+            return "ambiguous IP literal"
+        try:
+            ascii_host = raw_host.encode("idna").decode("ascii")
+        except UnicodeError:
+            return "invalid hostname"
+        try:
+            infos = socket.getaddrinfo(ascii_host, port or 443, type=socket.SOCK_STREAM)
+        except OSError:
+            return ""
+        for info in infos:
+            sockaddr = info[4]
+            if not sockaddr:
+                continue
+            try:
+                resolved = ipaddress.ip_address(str(sockaddr[0]))
+            except ValueError:
+                continue
+            if _ip_is_unsafe(resolved):
+                return f"private resolved address {resolved}"
+        return ""
+
+    if _ip_is_unsafe(ip):
+        return f"private address {ip}"
+    return ""
+
+
+def _validate_safe_url(url):
+    parsed = urlparse(str(url or ""))
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in _ALLOWED_FETCH_SCHEMES:
+        raise UnsafeUrlError(f"Blocked unsafe URL {_url_for_log(url)}: unsupported scheme")
+    if parsed.username or parsed.password:
+        raise UnsafeUrlError(f"Blocked unsafe URL {_url_for_log(url)}: embedded credentials")
+    reason = _host_is_unsafe(parsed.hostname, parsed.port)
+    if reason:
+        raise UnsafeUrlError(f"Blocked unsafe URL {_url_for_log(url)}: {reason}")
+    return True
+
+
+class _SafeHTTPRedirectHandler(__import__("urllib.request").request.HTTPRedirectHandler):
+    """Validate redirect targets before urllib follows them."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        resolved = urljoin(_request_url(req), newurl)
+        _validate_safe_url(resolved)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _safe_urlopen(req_or_url, timeout=15):
+    import urllib.request
+
+    initial_url = _request_url(req_or_url)
+    _validate_safe_url(initial_url)
+    opener = urllib.request.build_opener(_SafeHTTPRedirectHandler)
+    resp = opener.open(req_or_url, timeout=timeout)
+    final_url = getattr(resp, "geturl", lambda: "")()
+    if final_url:
+        _validate_safe_url(final_url)
+    return resp
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -3624,13 +3746,15 @@ class CrawlerWorker(QThread):
             import urllib.request
             req = urllib.request.Request(url)
             req.add_header('User-Agent', 'Mozilla/5.0')
-            resp = urllib.request.urlopen(req, timeout=10)
+            resp = _safe_urlopen(req, timeout=10)
             data = resp.read(2_000_000)  # cap at 2MB
             resp.close()
             if len(data) > 500:
                 with open(out_path, 'wb') as f:
                     f.write(data)
                 self.db.update_thumb_path(clip_id, out_path)
+        except UnsafeUrlError as e:
+            self.log(f"Thumbnail URL blocked [{clip_id}]: {e}", "WARN")
         except Exception:
             pass  # Thumbnail download failure is non-critical
 
@@ -4244,12 +4368,15 @@ class DirectScrapeWorker(QThread):
             hdrs.update(headers)
         req = urllib.request.Request(url, headers=hdrs)
         try:
-            resp = urllib.request.urlopen(req, timeout=timeout)
+            resp = _safe_urlopen(req, timeout=timeout)
             data = resp.read(max_size)
             # Handle gzip
             if resp.headers.get('Content-Encoding') == 'gzip':
                 data = gzip.decompress(data)
             return resp.status, data
+        except UnsafeUrlError as e:
+            self.log(f"Blocked unsafe HTTP URL: {e}", "WARN")
+            return 0, b''
         except urllib.error.HTTPError as e:
             return e.code, b''
         except Exception:
@@ -4291,7 +4418,7 @@ class DirectScrapeWorker(QThread):
             import urllib.request
             req = urllib.request.Request(url)
             req.add_header('User-Agent', 'Mozilla/5.0')
-            resp = urllib.request.urlopen(req, timeout=10)
+            resp = _safe_urlopen(req, timeout=10)
             data = resp.read(2_000_000)
             resp.close()
             if len(data) > 500:
@@ -4299,6 +4426,8 @@ class DirectScrapeWorker(QThread):
                     f.write(data)
                 with self._db_lock:
                     self.db.update_thumb_path(clip_id, out)
+        except UnsafeUrlError as e:
+            self.log(f"Thumbnail URL blocked [{clip_id}]: {e}", "WARN")
         except Exception:
             pass
 
@@ -5100,7 +5229,7 @@ class DirectScrapeWorker(QThread):
             try:
                 req = urllib.request.Request(gql_url, data=payload,
                                              headers=req_headers, method='POST')
-                resp = urllib.request.urlopen(req, timeout=15)
+                resp = _safe_urlopen(req, timeout=15)
                 body = resp.read(5_000_000)
                 resp.close()
                 if resp.headers.get('Content-Encoding') == 'gzip':
@@ -5110,6 +5239,9 @@ class DirectScrapeWorker(QThread):
                 with state_lock:
                     total_api[0] += 1
                 return self._walk_for_clips(data)
+            except UnsafeUrlError as e:
+                self.log(f"Blocked unsafe GraphQL URL: {e}", "WARN")
+                return []
             except Exception as e:
                 err = str(e)
                 if '403' in err or '429' in err:
@@ -5302,7 +5434,7 @@ class DirectScrapeWorker(QThread):
             try:
                 req = urllib.request.Request(url)
                 req.add_header('User-Agent', 'Mozilla/5.0')
-                resp = urllib.request.urlopen(req, timeout=8)
+                resp = _safe_urlopen(req, timeout=8)
                 data = resp.read(2_000_000)
                 resp.close()
                 if len(data) > 500:
@@ -5312,6 +5444,8 @@ class DirectScrapeWorker(QThread):
                         self.db.update_thumb_path(clip_id, out)
                     with state_lock:
                         thumb_count[0] += 1
+            except UnsafeUrlError as e:
+                self.log(f"Thumbnail URL blocked [{clip_id}]: {e}", "WARN")
             except Exception:
                 pass
 
@@ -6118,7 +6252,7 @@ class ThumbnailWorker(QThread):
         try:
             import urllib.request as _ur
             req = _ur.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with _ur.urlopen(req, timeout=15) as resp:
+            with _safe_urlopen(req, timeout=15) as resp:
                 with open(out_path, 'wb') as f:
                     f.write(resp.read())
             return os.path.isfile(out_path) and os.path.getsize(out_path) > 0
@@ -6662,12 +6796,14 @@ class DownloadWorker(QThread):
         try:
             req = urllib.request.Request(url, method='HEAD')
             req.add_header('User-Agent', 'Mozilla/5.0')
-            resp = urllib.request.urlopen(req, timeout=timeout)
+            resp = _safe_urlopen(req, timeout=timeout)
             code = resp.getcode()
             resp.close()
             if code and code >= 400:
                 return False, f"HTTP {code}"
             return True, "ok"
+        except UnsafeUrlError as e:
+            return False, f"blocked URL: {e}"
         except urllib.error.HTTPError as e:
             return False, f"HTTP {e.code}"
         except urllib.error.URLError as e:

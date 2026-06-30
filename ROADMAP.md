@@ -139,13 +139,6 @@ Roadmap for Stock Video Collector - a PyQt6 + Playwright desktop tool that crawl
   Acceptance: A selected collection/search can export a folder or archive containing clips, thumbnails, sidecars, license/provenance manifest, and checksum file.
   Complexity: M
 
-- [ ] P0 — Add shared URL safety policy for all app-initiated fetches
-  Why: Crawled/imported URLs can currently reach local or private network targets unless each caller remembers to guard them.
-  Evidence: `artlist_scraper.py:4239`, `artlist_scraper.py:6658`, OWASP SSRF guidance.
-  Touches: crawler/direct HTTP fetches, download preflight, thumbnail fetches, import URL handling, tests.
-  Acceptance: HTTP(S) fetch helpers block localhost, RFC1918, link-local, metadata-service, non-HTTP(S), redirect-to-private, and ambiguous IP-literal targets; blocked attempts are logged without leaking secrets.
-  Complexity: M
-
 - [ ] P1 — Keep Direct HTTP crawl mode usable without Chromium
   Why: Direct HTTP mode does not need Playwright, but the Start button is disabled when Chromium is missing.
   Evidence: `artlist_scraper.py:9073`, `artlist_scraper.py:9123`.

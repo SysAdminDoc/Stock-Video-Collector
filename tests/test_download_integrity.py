@@ -160,6 +160,7 @@ class DownloadWorkerIntegrationTests(unittest.TestCase):
                 worker = app.DownloadWorker(str(out_dir), db, max_concurrent=1, max_retries=0)
                 worker._fn_template = "{title}"
                 worker._extract_thumb = lambda clip_id, mp4_path: None
+                worker._head_check_url = lambda url, timeout=8: (True, "ok")
 
                 result = worker._download_one(row, ffmpeg)
 

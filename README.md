@@ -1,6 +1,6 @@
 # Stock Video Collector
 
-![Version](https://img.shields.io/badge/version-0.7.8-blue)
+![Version](https://img.shields.io/badge/version-0.7.9-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white)
 ![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?logo=qt&logoColor=white)
 ![Playwright](https://img.shields.io/badge/Playwright-Headless_Browser-2EAD33?logo=playwright&logoColor=white)
@@ -70,6 +70,7 @@ The **Generic** profile works on any site — it intercepts all video network re
 | Request interception | Blocks heavy HLS `.ts` segments during crawl to save bandwidth |
 | Configurable delays | Page delay, scroll delay, M3U8 wait, timeout — all adjustable per-run |
 | Secret-safe config | API keys, auth headers, cookies, and proxy credentials are vaulted outside plaintext config |
+| Fetch safety policy | App-initiated HTTP(S) fetches block localhost, private/link-local networks, metadata services, ambiguous IP literals, and redirect-to-private targets |
 
 ### Video Discovery
 
