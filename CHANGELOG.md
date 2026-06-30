@@ -2,6 +2,12 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.7.17] - 2026-06-30
+
+- Added: Optional official API connector layer for Pexels, Pixabay, Vimeo, and Adobe Stock, using configured keys before falling back to browser crawling.
+- Added: Config UI fields for API search query, API page limits, and provider keys/tokens, persisted through existing secret storage.
+- Added: API connector contract tests and crawler-level DB insertion coverage using fake API responses.
+
 ## [v0.7.16] - 2026-06-30
 
 - Changed: Built-in site profile definitions now live in importable `profiles/` modules instead of the main GUI/crawler file.

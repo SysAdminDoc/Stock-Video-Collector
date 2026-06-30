@@ -81,7 +81,7 @@ import secrets as _secrets
 
 APP_NAME = "Stock Video Collector"
 APP_PACKAGE_NAME = "Stock-Video-Collector"
-APP_VERSION = "0.7.16"
+APP_VERSION = "0.7.17"
 APP_WINDOW_TITLE = f"{APP_NAME}  v{APP_VERSION}"
 APP_CONFIG_DIR_NAME = "StockVideoCollector"
 LEGACY_APP_CONFIG_DIR_NAME = "ArtlistScraper"
@@ -283,6 +283,15 @@ import json, sqlite3, asyncio, threading
 from datetime import datetime
 from urllib.parse import urlparse, urlunparse, parse_qs, urlencode, unquote, urljoin
 
+from connectors import (
+    DEFAULT_PER_PAGE,
+    MAX_PAGE_LIMIT,
+    ApiConnectorError,
+    ApiResponse,
+    configured_connectors_for_profiles,
+    query_from_config,
+)
+
 
 class UnsafeUrlError(ValueError):
     """Raised when an app-initiated fetch targets a private or unsafe URL."""
@@ -404,6 +413,25 @@ def _safe_urlopen(req_or_url, timeout=15):
     if final_url:
         _validate_safe_url(final_url)
     return resp
+
+
+def _safe_api_json_request(api_request):
+    import urllib.request
+
+    req = urllib.request.Request(api_request.url, headers=dict(api_request.headers or {}))
+    with _safe_urlopen(req, timeout=api_request.timeout) as resp:
+        raw = resp.read()
+        try:
+            encoding = resp.headers.get_content_charset() or "utf-8"
+        except Exception:
+            encoding = "utf-8"
+        body = raw.decode(encoding, errors="replace") if raw else "{}"
+        data = json.loads(body) if body.strip() else {}
+        return ApiResponse(
+            status=int(getattr(resp, "status", resp.getcode())),
+            headers={str(k): str(v) for k, v in dict(resp.headers).items()},
+            data=data if isinstance(data, dict) else {},
+        )
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -2511,6 +2539,78 @@ class CrawlerWorker(QThread):
         self._video_re = self.profile.get_combined_video_re()
         self._batch_size = cfg.get('batch_size', 50)
 
+    def _api_start_url_for_profile(self, profile):
+        if len(self._profiles) == 1:
+            return self.cfg.get('start_url', '') or profile.start_url
+        return profile.start_url
+
+    def _run_configured_api_connectors(self):
+        crawl_mode = self.cfg.get('crawl_mode', 'full')
+        if crawl_mode not in ('full', 'catalog_sweep'):
+            return set()
+        if not self.cfg.get('use_official_apis', True):
+            return set()
+        profile_names = [p.name for p in self._profiles]
+        connectors = configured_connectors_for_profiles(profile_names, self.cfg)
+        if not connectors:
+            return set()
+
+        page_limit = int(self.cfg.get('api_page_limit') or 3)
+        page_limit = max(1, min(page_limit, MAX_PAGE_LIMIT))
+        per_page = int(self.cfg.get('api_per_page') or DEFAULT_PER_PAGE)
+        per_page = max(1, min(per_page, 200))
+        handled = set()
+
+        for connector in connectors:
+            if self._stop.is_set():
+                break
+            profile = next((p for p in self._profiles if p.name == connector.profile_name), None)
+            start_url = self._api_start_url_for_profile(profile) if profile else ''
+            query = query_from_config(self.cfg, connector.profile_name, start_url)
+            label = f"{connector.profile_name} official API"
+            query_label = f" query='{query}'" if query else " popular/default feed"
+            self.log(f"[{connector.profile_name}] Starting {label}{query_label} (pages={page_limit}, per_page={per_page})", "INFO")
+
+            page = 1
+            fetched = 0
+            saved = 0
+            successful_pages = 0
+            while page and successful_pages < page_limit and not self._stop.is_set():
+                try:
+                    result = connector.fetch_page(page, per_page, query, _safe_api_json_request)
+                except ApiConnectorError as e:
+                    self.log(f"[{connector.profile_name}] API unavailable, falling back to browser crawl: {_redact_text(e)}", "WARN")
+                    successful_pages = 0
+                    break
+                except Exception as e:
+                    self.log(f"[{connector.profile_name}] API connector failed, falling back to browser crawl: {_redact_text(e)}", "WARN")
+                    successful_pages = 0
+                    break
+
+                successful_pages += 1
+                fetched += len(result.clips)
+                for clip in result.clips:
+                    clip.setdefault('source_site', connector.profile_name)
+                    is_new = self.db.save_clip(clip)
+                    if is_new:
+                        saved += 1
+                        self.clip_signal.emit(clip)
+                quota = f", remaining={result.quota_remaining}" if result.quota_remaining else ""
+                total = f", total={result.total}" if result.total else ""
+                self.log(
+                    f"[{connector.profile_name}] API page {page}: {len(result.clips)} clip(s), {saved} new{quota}{total}",
+                    "OK")
+                self.stats_signal.emit(self.db.stats())
+                page = result.next_page
+
+            if successful_pages:
+                handled.add(connector.profile_name)
+                self.log(
+                    f"[{connector.profile_name}] API crawl complete: {fetched} fetched, {saved} new across {successful_pages} page(s)",
+                    "OK")
+
+        return handled
+
     def stop(self):   self._stop.set()
     def pause(self):  self._pause.set()
     def resume(self): self._pause.clear()
@@ -2834,6 +2934,22 @@ class CrawlerWorker(QThread):
     # ── Main crawl loop ─────────────────────────────────────────────────────
 
     async def _crawl(self):
+        api_handled = self._run_configured_api_connectors()
+        if api_handled:
+            remaining = [p for p in self._profiles if p.name not in api_handled]
+            if not remaining:
+                self.log("All selected profiles were handled by official APIs; browser crawl skipped.", "OK")
+                self.status_signal.emit("stopped")
+                self.stats_signal.emit(self.db.stats())
+                self.finished.emit()
+                return
+            self._profiles = remaining
+            self.profile = self._profiles[0]
+            self._video_re = self.profile.get_combined_video_re()
+            self.log(
+                "Continuing browser fallback for remaining profiles: " + ', '.join(p.name for p in self._profiles),
+                "INFO")
+
         from playwright.async_api import async_playwright
 
         headless = self.cfg.get('headless', True)
@@ -7648,6 +7764,15 @@ class MainWindow(QMainWindow):
             'lbl_m3u8_hdr': ("M3U8 clip status", "Header count of clips with stream URLs"),
             'lbl_status_hdr': ("Crawler status", "Current crawler activity state"),
             'inp_url': ("Start URL", "Catalog or search URL used by the selected crawl profiles"),
+            'chk_use_official_apis': ("Use official APIs", "Runs configured API connectors before browser crawling"),
+            'inp_api_search_query': ("API search query", "Search text used by official API connectors"),
+            'spin_api_page_limit': ("API page limit", "Maximum official API pages fetched per profile"),
+            'spin_api_per_page': ("API results per page", "Number of official API results requested per page"),
+            'inp_pexels_api_key': ("Pexels API key", "Stored through the secret vault or OS keyring"),
+            'inp_pixabay_api_key': ("Pixabay API key", "Stored through the secret vault or OS keyring"),
+            'inp_vimeo_access_token': ("Vimeo access token", "Stored through the secret vault or OS keyring"),
+            'inp_adobe_stock_api_key': ("Adobe Stock API key", "Stored through the secret vault or OS keyring"),
+            'inp_adobe_stock_access_token': ("Adobe Stock access token", "Stored through the secret vault or OS keyring"),
             'spin_batch_size': ("Batch size per site", "Pages crawled per site before rotating profiles"),
             'spin_page_delay': ("Page delay", "Delay between page loads in milliseconds"),
             'spin_scroll_delay': ("Scroll delay", "Delay between scroll steps in milliseconds"),
@@ -7801,6 +7926,51 @@ class MainWindow(QMainWindow):
         self.inp_url.setMinimumWidth(Z(200)); r.addWidget(self.inp_url, 1); g.addLayout(r)
         g.addWidget(self._sub("Crawler follows all video links from this page automatically."))
         lay.addWidget(grp)
+
+        # Official API connectors
+        grp_api = QGroupBox("Official API Connectors"); ga = QVBoxLayout(grp_api)
+        self.chk_use_official_apis = QCheckBox("Use official APIs when keys are configured")
+        self.chk_use_official_apis.setChecked(True)
+        self.chk_use_official_apis.setToolTip("API-backed profiles run before browser crawling and fall back to Playwright on API errors.")
+        ga.addWidget(self.chk_use_official_apis)
+
+        api_query_row = QHBoxLayout()
+        api_query_row.addWidget(QLabel("API search query:"))
+        self.inp_api_search_query = QLineEdit()
+        self.inp_api_search_query.setPlaceholderText("Optional; otherwise inferred from Start URL")
+        api_query_row.addWidget(self.inp_api_search_query, 1)
+        ga.addLayout(api_query_row)
+
+        api_limits = QHBoxLayout()
+        api_limits.addWidget(QLabel("API pages:"))
+        self.spin_api_page_limit = QSpinBox(); self.spin_api_page_limit.setRange(1, MAX_PAGE_LIMIT)
+        self.spin_api_page_limit.setValue(3); self.spin_api_page_limit.setFixedWidth(Z(90))
+        api_limits.addWidget(self.spin_api_page_limit)
+        api_limits.addSpacing(Z(18))
+        api_limits.addWidget(QLabel("Per page:"))
+        self.spin_api_per_page = QSpinBox(); self.spin_api_per_page.setRange(1, 200)
+        self.spin_api_per_page.setValue(DEFAULT_PER_PAGE); self.spin_api_per_page.setFixedWidth(Z(90))
+        api_limits.addWidget(self.spin_api_per_page)
+        api_limits.addStretch()
+        ga.addLayout(api_limits)
+
+        def api_key_row(label, attr, placeholder):
+            row = QHBoxLayout()
+            lab = QLabel(label); lab.setFixedWidth(Z(125))
+            row.addWidget(lab)
+            inp = QLineEdit()
+            inp.setEchoMode(QLineEdit.EchoMode.Password)
+            inp.setPlaceholderText(placeholder)
+            setattr(self, attr, inp)
+            row.addWidget(inp, 1)
+            return row
+
+        ga.addLayout(api_key_row("Pexels key:", "inp_pexels_api_key", "Authorization token"))
+        ga.addLayout(api_key_row("Pixabay key:", "inp_pixabay_api_key", "key parameter"))
+        ga.addLayout(api_key_row("Vimeo token:", "inp_vimeo_access_token", "Bearer access token"))
+        ga.addLayout(api_key_row("Adobe key:", "inp_adobe_stock_api_key", "x-api-key"))
+        ga.addLayout(api_key_row("Adobe token:", "inp_adobe_stock_access_token", "Optional Bearer token"))
+        lay.addWidget(grp_api)
 
         # Rate limits
         grp2 = QGroupBox("Rate Limiting  (Server Safety)"); g2 = QVBoxLayout(grp2)
@@ -9357,6 +9527,19 @@ class MainWindow(QMainWindow):
             'output_dir':   self.inp_output.text().strip(),
             'dl_dir':       self.inp_dl_dir.text().strip(),
         }
+        if hasattr(self, 'chk_use_official_apis'):
+            cfg['use_official_apis'] = self.chk_use_official_apis.isChecked()
+            cfg['api_search_query'] = self.inp_api_search_query.text().strip()
+            cfg['api_page_limit'] = self.spin_api_page_limit.value()
+            cfg['api_per_page'] = self.spin_api_per_page.value()
+            for key, attr in [
+                ('pexels_api_key', 'inp_pexels_api_key'),
+                ('pixabay_api_key', 'inp_pixabay_api_key'),
+                ('vimeo_access_token', 'inp_vimeo_access_token'),
+                ('adobe_stock_api_key', 'inp_adobe_stock_api_key'),
+                ('adobe_stock_access_token', 'inp_adobe_stock_access_token'),
+            ]:
+                cfg[key] = getattr(self, attr).text().strip()
         # v0.3.0 download settings
         if hasattr(self, 'spin_concurrent'):
             cfg['concurrent'] = self.spin_concurrent.value()
@@ -10458,6 +10641,22 @@ class MainWindow(QMainWindow):
         if 'resume'   in cfg: self.chk_resume.setChecked(cfg['resume'])
         if 'crawl_trace_on_failure' in cfg and hasattr(self, 'chk_crawl_trace'):
             self.chk_crawl_trace.setChecked(bool(cfg['crawl_trace_on_failure']))
+        if hasattr(self, 'chk_use_official_apis'):
+            self.chk_use_official_apis.setChecked(bool(cfg.get('use_official_apis', True)))
+            self.inp_api_search_query.setText(str(cfg.get('api_search_query', '') or ''))
+            if 'api_page_limit' in cfg:
+                self.spin_api_page_limit.setValue(int(cfg['api_page_limit']))
+            if 'api_per_page' in cfg:
+                self.spin_api_per_page.setValue(int(cfg['api_per_page']))
+            for key, attr in [
+                ('pexels_api_key', 'inp_pexels_api_key'),
+                ('pixabay_api_key', 'inp_pixabay_api_key'),
+                ('vimeo_access_token', 'inp_vimeo_access_token'),
+                ('adobe_stock_api_key', 'inp_adobe_stock_api_key'),
+                ('adobe_stock_access_token', 'inp_adobe_stock_access_token'),
+            ]:
+                if key in cfg:
+                    getattr(self, attr).setText(str(cfg.get(key, '') or ''))
         if 'fn_template' in cfg and hasattr(self, 'inp_fn_template'):
             self.inp_fn_template.setText(cfg['fn_template'])
             if hasattr(self, '_update_fn_preview'): self._update_fn_preview()
