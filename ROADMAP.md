@@ -187,3 +187,24 @@ Roadmap for Stock Video Collector - a PyQt6 + Playwright desktop tool that crawl
   Touches: DB backup helpers, Crawl/Admin tab recovery UI, backup metadata, tests.
   Acceptance: users can view timestamp/size/checksum for available backups, restore a selected verified backup, and configure/delete backups by retention policy.
   Complexity: M
+
+- [ ] P2 — Add thumbnail failure diagnostics and retry queue
+  Why: Thumbnail HTTP/ffmpeg failures are currently hard to see or repair, leaving large libraries with silent blank cards.
+  Evidence: `artlist_scraper.py:3621`, `artlist_scraper.py:6037`, Immich thumbnail/corrupt-media issue patterns.
+  Touches: thumbnail fetch helpers, `ThumbnailWorker`, DB schema, Library filters/actions, tests.
+  Acceptance: failed thumbnail jobs persist reason, source URL/local path, timestamp, and retry count; Library exposes a failed-thumbnail filter and retry/reset action; tests cover HTTP failure, ffmpeg failure, and successful retry cleanup.
+  Complexity: M
+
+- [ ] P2 — Add embedded provenance and metadata round-trip
+  Why: Existing sidecars and planned provenance fields do not preserve embedded IPTC/XMP/C2PA-style rights metadata from imported or exported video assets.
+  Evidence: `artlist_scraper.py:6138`, `artlist_scraper.py:6257`, `artlist_scraper.py:7017`, C2PA specifications, IPTC Video Metadata Hub.
+  Touches: DB schema after provenance fields, `ImportWorker`, sidecar writer, export workers, optional metadata-tool detection, tests.
+  Acceptance: imports read embedded title/creator/rights/license fields when available, exports include a standards-oriented provenance sidecar or validation report, and no in-place media metadata writes occur without explicit copy/backup behavior.
+  Complexity: L
+
+- [ ] P3 — Add explicit portable mode and config-location diagnostics
+  Why: Config, thumbnails, and default output paths still assume user-profile folders, making USB/portable usage and support harder.
+  Evidence: `artlist_scraper.py:1584`, `artlist_scraper.py:3571`, `artlist_scraper.py:7547`, `artlist_scraper.py:9514`, desktop downloader portable-use patterns.
+  Touches: config path helpers, startup args/env handling, About/diagnostics panel, path migration tests.
+  Acceptance: `--portable` or a documented sentinel stores config/db/thumbs/output under the app directory, diagnostics show the active config mode/path, and legacy/default mode remains backward-compatible.
+  Complexity: M
