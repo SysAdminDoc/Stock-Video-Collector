@@ -1,6 +1,6 @@
 # Stock Video Collector
 
-![Version](https://img.shields.io/badge/version-0.7.10-blue)
+![Version](https://img.shields.io/badge/version-0.7.11-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white)
 ![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?logo=qt&logoColor=white)
 ![Playwright](https://img.shields.io/badge/Playwright-Headless_Browser-2EAD33?logo=playwright&logoColor=white)
@@ -71,6 +71,7 @@ The **Generic** profile works on any site — it intercepts all video network re
 | Configurable delays | Page delay, scroll delay, M3U8 wait, timeout — all adjustable per-run |
 | Secret-safe config | API keys, auth headers, cookies, and proxy credentials are vaulted outside plaintext config |
 | Fetch safety policy | App-initiated HTTP(S) fetches block localhost, private/link-local networks, metadata services, ambiguous IP literals, and redirect-to-private targets |
+| App-data migration | Legacy `ArtlistScraper` config, vault, database, and backup files are copied into `StockVideoCollector` without overwriting current data |
 
 ### Video Discovery
 
@@ -264,6 +265,8 @@ Available variables: `{title}`, `{clip_id}`, `{creator}`, `{collection}`, `{reso
 **Clipboard monitor not working** — The clipboard monitor is opt-in. Enable it in your config by adding `"clipboard_monitor": true`, or toggle it programmatically. On Linux/Wayland, clipboard access may require additional permissions.
 
 **Config contains `__secret_ref__` values** — Sensitive settings are stored in the local encrypted vault under the app config directory and are hydrated automatically at runtime.
+
+**Where is app data stored?** — Current config, vault, database, backups, browser profile, and thumbnail cache live under `StockVideoCollector`. Existing `ArtlistScraper` config, vault, database, and backups are copied forward on startup without deleting or overwriting legacy data.
 
 ---
 

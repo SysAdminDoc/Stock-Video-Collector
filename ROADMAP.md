@@ -139,13 +139,6 @@ Roadmap for Stock Video Collector - a PyQt6 + Playwright desktop tool that crawl
   Acceptance: A selected collection/search can export a folder or archive containing clips, thumbnails, sidecars, license/provenance manifest, and checksum file.
   Complexity: M
 
-- [ ] P1 — Migrate legacy `ArtlistScraper` app data path to `StockVideoCollector`
-  Why: Persisting config, vault data, backups, and the database under the old product name makes support and migration confusing.
-  Evidence: `artlist_scraper.py:1584`, `artlist_scraper.py:7116`, `README.md`.
-  Touches: config path helpers, startup migration, DB/vault/backup paths, tests.
-  Acceptance: first launch creates/uses a `StockVideoCollector` config directory, migrates or compatibility-reads legacy `ArtlistScraper` data without data loss, and logs the migration result.
-  Complexity: M
-
 - [ ] P1 — Move stored secrets to OS-backed keyring with local fallback
   Why: The current vault redacts JSON but relies on a local key file; official API, proxy, and cookie work will add higher-value credentials.
   Evidence: `artlist_scraper.py:1599`, Python keyring project.

@@ -2,6 +2,12 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.7.11] - 2026-06-30
+
+- Changed: App data now uses the `StockVideoCollector` config root, with startup migration that copies missing legacy `ArtlistScraper` config, vault, database, and backup files without overwriting current data.
+- Changed: Default output and thumbnail-cache paths use the current product name.
+- Added: Config path migration tests covering current directory selection, legacy copy-forward behavior, thumbnail cache, and default output paths.
+
 ## [v0.7.10] - 2026-06-30
 
 - Fixed: Direct HTTP crawl mode stays startable when Playwright Chromium is missing, while browser-required crawl modes still show install guidance and remain blocked.

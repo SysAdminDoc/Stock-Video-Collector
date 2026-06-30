@@ -80,8 +80,10 @@ import secrets as _secrets
 
 APP_NAME = "Stock Video Collector"
 APP_PACKAGE_NAME = "Stock-Video-Collector"
-APP_VERSION = "0.7.10"
+APP_VERSION = "0.7.11"
 APP_WINDOW_TITLE = f"{APP_NAME}  v{APP_VERSION}"
+APP_CONFIG_DIR_NAME = "StockVideoCollector"
+LEGACY_APP_CONFIG_DIR_NAME = "ArtlistScraper"
 
 
 def _branding_icon_path() -> Path:
@@ -1703,11 +1705,98 @@ class DB:
 # CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 
+_CONFIG_MIGRATION_MESSAGE = ""
+_CONFIG_MIGRATED_DIRS = set()
+_LEGACY_CONFIG_MIGRATION_FILES = (
+    'config.json',
+    'secrets.key',
+    'secrets.json',
+    'artlist_results.db',
+)
+_LEGACY_CONFIG_MIGRATION_DIRS = (
+    'backups',
+)
+
+
+def _config_base_dir():
+    return os.environ.get('APPDATA', os.path.expanduser('~'))
+
+
+def _count_files(root):
+    count = 0
+    for _dirpath, _dirnames, filenames in os.walk(root):
+        count += len(filenames)
+    return count
+
+
+def _copy_missing_file(src, dst):
+    if not os.path.isfile(src) or os.path.exists(dst):
+        return 0
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.copy2(src, dst)
+    return 1
+
+
+def _copy_missing_dir(src, dst):
+    if not os.path.isdir(src) or os.path.exists(dst):
+        return 0
+    shutil.copytree(src, dst)
+    return _count_files(dst)
+
+
+def _migrate_legacy_config_dir(current_dir, legacy_dir):
+    global _CONFIG_MIGRATION_MESSAGE
+    current_key = os.path.abspath(current_dir)
+    if current_key in _CONFIG_MIGRATED_DIRS:
+        return
+    _CONFIG_MIGRATED_DIRS.add(current_key)
+    if not os.path.isdir(legacy_dir):
+        return
+    if current_key == os.path.abspath(legacy_dir):
+        return
+    try:
+        os.makedirs(current_dir, exist_ok=True)
+        copied = 0
+        for name in _LEGACY_CONFIG_MIGRATION_FILES:
+            copied += _copy_missing_file(
+                os.path.join(legacy_dir, name),
+                os.path.join(current_dir, name))
+        for name in _LEGACY_CONFIG_MIGRATION_DIRS:
+            copied += _copy_missing_dir(
+                os.path.join(legacy_dir, name),
+                os.path.join(current_dir, name))
+        if copied:
+            _CONFIG_MIGRATION_MESSAGE = (
+                f"Migrated {copied} file(s) from legacy {LEGACY_APP_CONFIG_DIR_NAME} app data "
+                f"to {APP_CONFIG_DIR_NAME}: {current_dir}")
+    except Exception as e:
+        _CONFIG_MIGRATION_MESSAGE = f"Legacy app data migration failed: {_redact_text(e)}"
+
+
+def _consume_config_migration_message():
+    global _CONFIG_MIGRATION_MESSAGE
+    msg = _CONFIG_MIGRATION_MESSAGE
+    _CONFIG_MIGRATION_MESSAGE = ""
+    return msg
+
+
 def get_config_dir():
-    base = os.environ.get('APPDATA', os.path.expanduser('~'))
-    p = os.path.join(base, 'ArtlistScraper')
-    os.makedirs(p, exist_ok=True)
-    return p
+    base = _config_base_dir()
+    current = os.path.join(base, APP_CONFIG_DIR_NAME)
+    legacy = os.path.join(base, LEGACY_APP_CONFIG_DIR_NAME)
+    _migrate_legacy_config_dir(current, legacy)
+    os.makedirs(current, exist_ok=True)
+    return current
+
+
+def _default_output_dir():
+    return os.path.join(os.path.expanduser('~'), APP_CONFIG_DIR_NAME, 'output')
+
+
+def get_thumbnail_cache_dir():
+    d = os.path.join(get_config_dir(), 'thumbnails')
+    os.makedirs(d, exist_ok=True)
+    return d
 
 
 def _secret_key_path():
@@ -3689,10 +3778,7 @@ class CrawlerWorker(QThread):
             return 0
 
         # ── Save extracted cards to DB ────────────────────────────────
-        thumb_dir = os.path.join(
-            os.environ.get('APPDATA', os.path.expanduser('~')),
-            'ArtlistScraper', 'thumbnails')
-        os.makedirs(thumb_dir, exist_ok=True)
+        thumb_dir = get_thumbnail_cache_dir()
 
         for card in cards:
             if self._stop.is_set():
@@ -3783,9 +3869,7 @@ class CrawlerWorker(QThread):
 
             # Walk the JSON for clip-like objects
             clips_found = 0
-            thumb_dir = os.path.join(
-                os.environ.get('APPDATA', os.path.expanduser('~')),
-                'ArtlistScraper', 'thumbnails')
+            thumb_dir = get_thumbnail_cache_dir()
 
             def _walk(obj):
                 nonlocal clips_found
@@ -4831,10 +4915,7 @@ class DirectScrapeWorker(QThread):
         """Main direct scrape pipeline: browser bootstrap → GraphQL pagination."""
         self.log("=== DIRECT HTTP SCRAPE MODE ===", "OK")
 
-        thumb_dir = os.path.join(
-            os.environ.get('APPDATA', os.path.expanduser('~')),
-            'ArtlistScraper', 'thumbnails')
-        os.makedirs(thumb_dir, exist_ok=True)
+        thumb_dir = get_thumbnail_cache_dir()
 
         total_new = 0
         total_updated = 0
@@ -5756,9 +5837,7 @@ class DirectScrapeWorker(QThread):
         consecutive_miss = 0
         jump_count = 0
         current_id = start_id
-        thumb_dir = os.path.join(
-            os.environ.get('APPDATA', os.path.expanduser('~')),
-            'ArtlistScraper', 'thumbnails')
+        thumb_dir = get_thumbnail_cache_dir()
 
         while probe_count < max_probes and not self._stop.is_set():
             if consecutive_miss >= max_gap:
@@ -7260,6 +7339,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._load_saved_config()
         self._check_browser_status()
+        self._emit_config_migration_status()
 
         self._dl_clip_rows = {}   # populated by _start_downloads
         self._dl_done_count = 0
@@ -7680,7 +7760,7 @@ class MainWindow(QMainWindow):
 
         # Output dir
         grp5 = QGroupBox("Output Directory"); g5 = QHBoxLayout(grp5)
-        self.inp_output = QLineEdit(os.path.join(os.path.expanduser('~'), 'ArtlistScraper', 'output'))
+        self.inp_output = QLineEdit(_default_output_dir())
         g5.addWidget(self.inp_output,1)
         bb = QPushButton("Browse..."); bb.setObjectName("neutral"); bb.setFixedWidth(Z(90))
         bb.clicked.connect(self._browse_output); g5.addWidget(bb)
@@ -9207,6 +9287,13 @@ class MainWindow(QMainWindow):
 
     # ── Browser management ──────────────────────────────────────────────────
 
+    def _emit_config_migration_status(self):
+        msg = _consume_config_migration_message()
+        if not msg:
+            return
+        self._on_log(msg, "OK" if "failed" not in msg.lower() else "ERROR")
+        self.status_bar.showMessage(msg, 8000)
+
     def _current_crawl_mode(self):
         if hasattr(self, 'combo_crawl_mode'):
             return self.combo_crawl_mode.currentData() or 'full'
@@ -9662,7 +9749,7 @@ class MainWindow(QMainWindow):
 
     def _thumb_dir(self):
         base = self.inp_output.text().strip() if hasattr(self, 'inp_output') else ''
-        if not base: base = os.path.join(os.path.expanduser('~'), 'ArtlistScraper', 'output')
+        if not base: base = _default_output_dir()
         d = os.path.join(base, 'thumbs')
         os.makedirs(d, exist_ok=True)
         return d
@@ -9769,7 +9856,7 @@ class MainWindow(QMainWindow):
 
     def _out_dir(self):
         d = self.inp_output.text().strip() if hasattr(self,'inp_output') else ''
-        if not d: d = os.path.join(os.path.expanduser('~'),'ArtlistScraper','output')
+        if not d: d = _default_output_dir()
         os.makedirs(d, exist_ok=True); return d
 
     def _ts(self): return datetime.now().strftime('%Y%m%d-%H%M%S')
@@ -9972,7 +10059,7 @@ class MainWindow(QMainWindow):
         d = self.inp_dl_dir.text().strip()
         if not d:
             base = self.inp_output.text().strip() if hasattr(self,'inp_output') else ''
-            if not base: base = os.path.join(os.path.expanduser('~'), 'ArtlistScraper', 'output')
+            if not base: base = _default_output_dir()
             d = os.path.join(base, 'downloads')
         os.makedirs(d, exist_ok=True)
         return d
