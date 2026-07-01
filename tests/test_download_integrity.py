@@ -210,9 +210,11 @@ class DownloadWorkerSourceContractTests(unittest.TestCase):
         self.assertIn("'-f', 'mp4',", source)
         self.assertIn("os.replace(part_path, out_path)", source)
 
-        replace_idx = source.index("os.replace(part_path, out_path)")
-        sidecar_idx = source.index("self._write_sidecar(clip_data, out_path)")
-        db_idx = source.index("self.db.update_local_path(clip_id, out_path, 'done')", replace_idx)
+        method_start = source.index("def _download_one(self, clip, ffmpeg):")
+        method_src = source[method_start:]
+        replace_idx = method_src.index("os.replace(part_path, out_path)")
+        sidecar_idx = method_src.index("self._write_sidecar(clip_data, out_path)")
+        db_idx = method_src.index("self.db.update_local_path(clip_id, out_path, 'done')", replace_idx)
 
         self.assertLess(replace_idx, sidecar_idx)
         self.assertLess(replace_idx, db_idx)

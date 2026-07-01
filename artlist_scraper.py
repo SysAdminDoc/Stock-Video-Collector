@@ -308,6 +308,8 @@ from connectors import (
     configured_connectors_for_profiles,
     query_from_config,
 )
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 
 class UnsafeUrlError(ValueError):
@@ -817,6 +819,21 @@ class CrawlBudgetController:
         return f"{host_key} cooling down for {min(wait, 3600.0):.1f}s ({reason})"
 
 
+def _parse_schedule_time(value, default='02:00'):
+    raw = str(value or default).strip()
+    match = re.match(r'^(\d{1,2}):(\d{2})$', raw)
+    if not match:
+        raw = str(default or '02:00')
+        match = re.match(r'^(\d{1,2}):(\d{2})$', raw)
+    hour = max(0, min(23, int(match.group(1)))) if match else 2
+    minute = max(0, min(59, int(match.group(2)))) if match else 0
+    return hour, minute
+
+
+def _format_schedule_time(hour, minute):
+    return f"{max(0, min(23, int(hour))):02d}:{max(0, min(59, int(minute))):02d}"
+
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTabWidget, QLabel, QPushButton, QLineEdit, QTextEdit, QSpinBox,
@@ -824,10 +841,10 @@ from PyQt6.QtWidgets import (
     QHeaderView, QProgressBar, QFrame, QComboBox, QMenu,
     QScrollArea, QStatusBar, QMessageBox, QAbstractItemView,
     QSplitter, QSlider, QStackedWidget, QSizePolicy, QLayout,
-    QSystemTrayIcon, QGraphicsOpacityEffect
+    QSystemTrayIcon, QGraphicsOpacityEffect, QTimeEdit
 )
 from PyQt6.QtCore import (
-    Qt, QThread, pyqtSignal, QTimer, QSize, QRect, QPoint, QUrl,
+    Qt, QThread, pyqtSignal, QTimer, QSize, QRect, QPoint, QUrl, QTime,
     QPropertyAnimation, QEasingCurve
 )
 from PyQt6.QtGui import (
@@ -8429,7 +8446,8 @@ def _safe_filename(title, clip_id, ext='.mp4'):
 class DownloadWorker(QThread):
     """
     Persistent download queue worker with concurrent downloads, retry with
-    exponential backoff, and real-time speed + ETA tracking.
+    exponential backoff, real-time speed + ETA tracking, per-site concurrency
+    caps, priority queue, and yt-dlp fallback.
     """
     progress_signal = pyqtSignal(str, int, str)   # clip_id, percent, status_text
     clip_done       = pyqtSignal(str, bool, str)  # clip_id, success, local_path_or_error
@@ -8437,12 +8455,18 @@ class DownloadWorker(QThread):
     speed_signal    = pyqtSignal(str, float)        # clip_id, bytes_per_sec
     all_done        = pyqtSignal()
 
-    def __init__(self, out_dir, db, max_concurrent=2, max_retries=3):
+    PRIORITY_HIGH   = 0
+    PRIORITY_NORMAL = 5
+    PRIORITY_LOW    = 9
+
+    def __init__(self, out_dir, db, max_concurrent=2, max_retries=3,
+                 per_site_limit=0):
         super().__init__()
         import queue as _queue
         self.out_dir        = out_dir
         self.db             = db
-        self._queue         = _queue.Queue()
+        self._queue         = _queue.PriorityQueue()
+        self._queue_seq     = 0
         self._stop          = threading.Event()
         self._procs         = {}               # clip_id -> subprocess.Popen
         self._procs_lock    = threading.Lock()
@@ -8452,6 +8476,9 @@ class DownloadWorker(QThread):
         self.max_retries    = max_retries
         self._active_count  = 0
         self._active_lock   = threading.Lock()
+        self._per_site_limit = per_site_limit
+        self._site_active   = {}               # source_site -> active count
+        self._site_lock     = threading.Lock()
         # Pre-populate _seen with already-downloaded clips to prevent re-downloads
         try:
             rows = db.execute(
@@ -8466,7 +8493,24 @@ class DownloadWorker(QThread):
         except Exception:
             pass
 
-    def enqueue(self, clip):
+    def _site_acquire(self, site):
+        if not self._per_site_limit or not site:
+            return True
+        with self._site_lock:
+            cur = self._site_active.get(site, 0)
+            if cur >= self._per_site_limit:
+                return False
+            self._site_active[site] = cur + 1
+            return True
+
+    def _site_release(self, site):
+        if not self._per_site_limit or not site:
+            return
+        with self._site_lock:
+            cur = self._site_active.get(site, 0)
+            self._site_active[site] = max(0, cur - 1)
+
+    def enqueue(self, clip, priority=None):
         """Thread-safe: add a clip dict/Row to the download queue. Returns True if actually queued."""
         cid = clip['clip_id'] if hasattr(clip, '__getitem__') else clip.get('clip_id', '')
         if not cid or cid in self._seen:
@@ -8475,9 +8519,12 @@ class DownloadWorker(QThread):
         if not m3u8:
             return False
         self._seen.add(cid)
-        self._queue.put(dict(clip))
+        if priority is None:
+            priority = self.PRIORITY_NORMAL
+        self._queue_seq += 1
+        self._queue.put((priority, self._queue_seq, dict(clip)))
         self.log_signal.emit(
-            f"[DL-Q] Enqueued id:{cid} ({self._queue.qsize()} in queue)", "INFO")
+            f"[DL-Q] Enqueued id:{cid} pri:{priority} ({self._queue.qsize()} in queue)", "INFO")
         return True
 
     def queue_size(self):
@@ -8485,9 +8532,8 @@ class DownloadWorker(QThread):
 
     def stop(self):
         self._stop.set()
-        # Push a single sentinel to unblock the main dispatch loop's queue.get()
         try:
-            self._queue.put_nowait(None)
+            self._queue.put_nowait((-1, 0, None))
         except Exception:
             pass
         with self._procs_lock:
@@ -8504,36 +8550,56 @@ class DownloadWorker(QThread):
 
         os.makedirs(self.out_dir, exist_ok=True)
         ffmpeg = _get_ffmpeg()
-        self.log(f"Download worker ready  |  ffmpeg: {ffmpeg}  |  concurrent: {self.max_concurrent}", "INFO")
+        site_info = f"  |  per-site cap: {self._per_site_limit}" if self._per_site_limit else ""
+        self.log(f"Download worker ready  |  ffmpeg: {ffmpeg}  |  concurrent: {self.max_concurrent}{site_info}", "INFO")
 
+        deferred = []
         with ThreadPoolExecutor(max_workers=self.max_concurrent) as pool:
             futures = {}
             while not self._stop.is_set():
+                # Re-check deferred items
+                still_deferred = []
+                for item in deferred:
+                    _pri, _seq, clip = item
+                    site = str(clip.get('source_site', '') or '')
+                    if self._site_acquire(site):
+                        fut = pool.submit(self._download_one_with_retry, clip, ffmpeg)
+                        futures[fut] = clip
+                    else:
+                        still_deferred.append(item)
+                deferred = still_deferred
+
                 # Submit new jobs up to max_concurrent
                 while len(futures) < self.max_concurrent and not self._stop.is_set():
                     try:
-                        clip = self._queue.get(timeout=0.5)
+                        item = self._queue.get(timeout=0.5)
                     except _queue.Empty:
                         break
+                    _pri, _seq, clip = item
                     if clip is None or self._stop.is_set():
-                        break  # Sentinel or stop — exit submit loop
+                        break
+                    site = str(clip.get('source_site', '') or '')
+                    if self._per_site_limit and not self._site_acquire(site):
+                        deferred.append(item)
+                        continue
                     fut = pool.submit(self._download_one_with_retry, clip, ffmpeg)
                     futures[fut] = clip
 
                 # Check for completed futures
                 done_futs = [f for f in futures if f.done()]
                 for f in done_futs:
-                    del futures[f]
+                    done_clip = futures.pop(f)
+                    site = str(done_clip.get('source_site', '') or '')
+                    self._site_release(site)
                     try:
                         f.result()
                     except Exception as e:
                         self.log(f"Unhandled download error: {e}", "ERROR")
 
-                if not futures and self._queue.empty():
-                    # Brief wait for new items before declaring idle
+                if not futures and self._queue.empty() and not deferred:
                     import time as _time
                     _time.sleep(1.0)
-                    if self._queue.empty() and not futures and not self._stop.is_set():
+                    if self._queue.empty() and not futures and not deferred and not self._stop.is_set():
                         break
 
             # Cancel remaining futures on stop
@@ -8548,7 +8614,7 @@ class DownloadWorker(QThread):
         self.all_done.emit()
 
     def _download_one_with_retry(self, clip, ffmpeg):
-        """Download a single clip with smart retry — skips retries for permanent failures."""
+        """Download a single clip with smart retry, then yt-dlp fallback."""
         import time as _time
         clip_id = str(clip.get('clip_id', '') or '')
 
@@ -8556,7 +8622,7 @@ class DownloadWorker(QThread):
             if self._stop.is_set():
                 return
             if attempt > 0:
-                wait = min(2 ** attempt, 15)  # cap at 15s (was 30)
+                wait = min(2 ** attempt, 15)
                 self.log(f"Retry {attempt}/{self.max_retries} for [{clip_id}] in {wait}s", "WARN")
                 self.progress_signal.emit(clip_id, 0, f"Retry {attempt} in {wait}s...")
                 _time.sleep(wait)
@@ -8567,17 +8633,96 @@ class DownloadWorker(QThread):
             if result == 'ok':
                 return
             if result == 'permanent':
-                # URL expired/dead/403/404 — retrying won't help
-                self.db.set_dl_status(clip_id, 'error')
-                self.log(f"Permanent failure [{clip_id}] — skipping retries", "ERROR")
-                self.clip_done.emit(clip_id, False, "URL expired or unreachable")
-                return
+                break
 
-        # All retries exhausted (transient failures only reach here)
+        # ffmpeg failed — try yt-dlp fallback for source_url or m3u8_url
+        ytdlp_result = self._try_ytdlp_download(clip, ffmpeg)
+        if ytdlp_result == 'ok':
+            return
+
         self.db.set_dl_status(clip_id, 'error')
-        self.progress_signal.emit(clip_id, 0, f"Failed after {self.max_retries+1} attempts")
-        self.log(f"Gave up [{clip_id}] after {self.max_retries+1} attempts", "ERROR")
-        self.clip_done.emit(clip_id, False, f"Failed after {self.max_retries+1} attempts")
+        self.progress_signal.emit(clip_id, 0, f"Failed (ffmpeg + yt-dlp)")
+        self.log(f"Gave up [{clip_id}] after ffmpeg retries + yt-dlp fallback", "ERROR")
+        self.clip_done.emit(clip_id, False, "Failed after all download methods")
+
+    def _try_ytdlp_download(self, clip, ffmpeg):
+        """Fallback: try downloading via yt-dlp when ffmpeg fails."""
+        clip_id = str(clip.get('clip_id', '') or '')
+        source_url = str(clip.get('source_url', '') or '')
+        m3u8_url = str(clip.get('m3u8_url', '') or '')
+        url = source_url or m3u8_url
+        if not url:
+            return 'permanent'
+
+        ytdlp = shutil.which('yt-dlp') or shutil.which('yt-dlp.exe')
+        if not ytdlp:
+            return 'permanent'
+
+        self.log(f"[DL] Trying yt-dlp fallback for [{clip_id}]", "INFO")
+        self.progress_signal.emit(clip_id, 0, "yt-dlp fallback...")
+
+        fn_tpl = self._fn_template
+        clip_data = dict(clip) if isinstance(clip, dict) else dict(zip(clip.keys(), tuple(clip)))
+        filename = _apply_fn_template(fn_tpl, clip_data, clip_id)
+        out_path = os.path.join(self.out_dir, filename)
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+        try:
+            cmd = [
+                ytdlp,
+                '--no-warnings',
+                '--no-playlist',
+                '-o', out_path,
+                '--merge-output-format', 'mp4',
+                url,
+            ]
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True, encoding='utf-8', errors='replace')
+
+            with self._procs_lock:
+                self._procs[clip_id] = proc
+
+            proc.wait(timeout=300)
+            rc = proc.returncode
+            with self._procs_lock:
+                self._procs.pop(clip_id, None)
+
+            if self._stop.is_set():
+                return 'transient'
+
+            if rc == 0 and os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
+                valid, reason = _validate_video_file(out_path, ffmpeg)
+                if not valid:
+                    self.log(f"[DL] yt-dlp output invalid [{clip_id}]: {reason}", "WARN")
+                    return 'transient'
+
+                file_hash = _sha256_file(out_path)
+                visual_hash = _video_perceptual_hash(out_path, ffmpeg)
+                clip_data['file_sha256'] = file_hash
+                clip_data['perceptual_hash'] = visual_hash
+                self._write_sidecar(clip_data, out_path)
+                self.db.update_local_path(clip_id, out_path, 'done')
+                if hasattr(self.db, 'update_duplicate_fingerprints'):
+                    self.db.update_duplicate_fingerprints(clip_id, file_hash, visual_hash)
+                self._extract_thumb(clip_id, out_path)
+                fsize = os.path.getsize(out_path)
+                size_str = f"{fsize/1_000_000:.1f} MB" if fsize > 1_000_000 else f"{fsize/1000:.0f} KB"
+                self.progress_signal.emit(clip_id, 100, f"Done (yt-dlp)  |  {size_str}")
+                self.log(f"Done via yt-dlp: {filename}  ({size_str})", "OK")
+                self.clip_done.emit(clip_id, True, out_path)
+                return 'ok'
+            else:
+                self.log(f"[DL] yt-dlp failed [{clip_id}] exit {rc}", "WARN")
+                return 'transient'
+
+        except Exception as e:
+            with self._procs_lock:
+                self._procs.pop(clip_id, None)
+            self.log(f"[DL] yt-dlp error [{clip_id}]: {e}", "ERROR")
+            return 'transient'
 
     @staticmethod
     def _head_check_url(url, timeout=8):
@@ -9061,11 +9206,16 @@ class ToastNotification(QLabel):
 
 
 class MainWindow(QMainWindow):
+    scheduled_crawl_signal = pyqtSignal()
+
     def __init__(self):
         super().__init__()
         self.db              = None
         self.worker          = None
         self._dl_worker      = None   # DownloadWorker instance
+        self._scheduler      = None
+        self._scheduled_job_id = 'nightly-incremental-crawl'
+        self.scheduled_crawl_signal.connect(self._run_scheduled_crawl)
         self._db_path        = os.path.join(get_config_dir(), 'artlist_results.db')
         self._latest_db_backup_path = self._find_latest_db_backup()
 
@@ -9076,6 +9226,7 @@ class MainWindow(QMainWindow):
         self._init_db()
         self._build_ui()
         self._load_saved_config()
+        self._configure_scheduled_crawl(load_config() or {})
         self._check_browser_status()
         self._emit_startup_storage_status()
 
@@ -9477,6 +9628,9 @@ class MainWindow(QMainWindow):
             'spin_crawl_budget_min_delay': ("Per-host minimum crawl gap", "Minimum delay between browser navigations to the same host"),
             'spin_max_pages': ("Maximum pages", "Stop after this many pages; zero means unlimited"),
             'spin_max_depth': ("Maximum crawl depth", "Link-following depth from the start URL"),
+            'chk_scheduled_crawl': ("Enable scheduled crawl", "Runs an incremental crawl at the configured nightly time while the app is open"),
+            'time_scheduled_crawl': ("Scheduled crawl time", "Local time for the nightly incremental crawl"),
+            'lbl_schedule_status': ("Scheduled crawl status", "Shows whether a scheduled crawl is active and when it will run next"),
             'chk_headless': ("Headless mode", "Run the browser without a visible window"),
             'chk_resume': ("Resume mode", "Skip pages already marked crawled"),
             'chk_crawl_trace': ("Save failed-crawl diagnostics", "Save redacted trace bundles when browser crawls fail"),
@@ -9555,6 +9709,7 @@ class MainWindow(QMainWindow):
             'spin_concurrent': ("Concurrent downloads", "Number of parallel download workers"),
             'spin_max_retries': ("Maximum download retries", "Retry count for failed downloads"),
             'spin_bw_limit': ("Download speed limit", "Maximum download speed in KB per second"),
+            'spin_per_site_cap': ("Per-site download cap", "Maximum concurrent downloads per source site"),
             'dl_overall_bar': ("Overall download progress", "Progress across queued downloads"),
             'dl_item_bar': ("Current download progress", "Progress for the active download"),
             'lbl_dl_current': ("Current download status", "Current item download status"),
@@ -9588,6 +9743,7 @@ class MainWindow(QMainWindow):
         order = [
             'inp_url', 'combo_crawl_mode', 'btn_start', 'btn_pause', 'btn_stop',
             'chk_respect_crawl_budget', 'spin_crawl_budget_min_delay',
+            'chk_scheduled_crawl', 'time_scheduled_crawl',
             'chk_challenge_notify', 'inp_challenge_discord_webhook', 'inp_challenge_telegram_bot_token', 'inp_challenge_telegram_chat_id',
             'chk_rotate_browser_profiles', 'spin_browser_profile_slots', 'chk_proxy_pool', 'chk_residential_proxy_sticky', 'inp_proxy_pool_path',
             'inp_search', 'combo_sort', 'combo_duration', 'combo_user_collection',
@@ -9596,7 +9752,7 @@ class MainWindow(QMainWindow):
             'btn_backup_prune', 'spin_backup_retention', 'backup_table',
             'btn_import_folder', 'btn_fetch_thumbs', 'btn_retry_thumb_errors', 'detail_notes', 'detail_user_tags',
             'detail_coll_combo', 'inp_dl_dir', 'spin_concurrent', 'spin_max_retries',
-            'spin_bw_limit', 'btn_dl_all', 'btn_dl_new', 'btn_dl_sel', 'inp_scan_dir',
+            'spin_bw_limit', 'spin_per_site_cap', 'btn_dl_all', 'btn_dl_new', 'btn_dl_sel', 'inp_scan_dir',
             'inp_fn_template',
         ]
         widgets = [getattr(self, name, None) for name in order]
@@ -9727,6 +9883,30 @@ class MainWindow(QMainWindow):
         g3.addLayout(spinrow("Max pages:", 'spin_max_pages', 0,99999,0,"","Stop after N pages (0=unlimited)."))
         g3.addLayout(spinrow("Max depth:", 'spin_max_depth', 1,   25,3,"","Depth from start URL."))
         lay.addWidget(grp3)
+
+        # Scheduled crawls
+        grp_schedule = QGroupBox("Scheduled Crawls"); gs = QVBoxLayout(grp_schedule)
+        row_schedule = QHBoxLayout()
+        self.chk_scheduled_crawl = QCheckBox("Nightly incremental crawl")
+        self.chk_scheduled_crawl.setToolTip("Runs the current crawl configuration at the selected local time while the app is open; Resume mode is forced on.")
+        row_schedule.addWidget(self.chk_scheduled_crawl)
+        row_schedule.addSpacing(Z(18))
+        row_schedule.addWidget(QLabel("Start time:"))
+        self.time_scheduled_crawl = QTimeEdit()
+        self.time_scheduled_crawl.setDisplayFormat("HH:mm")
+        self.time_scheduled_crawl.setTime(QTime(2, 0))
+        self.time_scheduled_crawl.setFixedWidth(Z(95))
+        row_schedule.addWidget(self.time_scheduled_crawl)
+        row_schedule.addStretch()
+        gs.addLayout(row_schedule)
+        self.lbl_schedule_status = QLabel("Scheduled crawl disabled.")
+        self.lbl_schedule_status.setObjectName("subtext")
+        self.lbl_schedule_status.setWordWrap(True)
+        gs.addWidget(self.lbl_schedule_status)
+        gs.addWidget(self._sub("Scheduled runs reuse the current profile/mode/settings, force Resume mode on, and skip if another crawl is already running."))
+        self.chk_scheduled_crawl.toggled.connect(lambda _checked: self._configure_scheduled_crawl(self._collect_config()))
+        self.time_scheduled_crawl.timeChanged.connect(lambda _time: self._configure_scheduled_crawl(self._collect_config()))
+        lay.addWidget(grp_schedule)
 
         # Options
         grp4 = QGroupBox("Options"); g4 = QHBoxLayout(grp4)
@@ -11310,6 +11490,13 @@ class MainWindow(QMainWindow):
         self.spin_bw_limit.setFixedWidth(Z(120))
         self.spin_bw_limit.setToolTip("Max download speed (0 = unlimited)")
         perf_row.addWidget(self.spin_bw_limit)
+
+        perf_row.addSpacing(Z(10))
+        perf_row.addWidget(QLabel("Per-Site Cap:"))
+        self.spin_per_site_cap = QSpinBox(); self.spin_per_site_cap.setRange(0, 16)
+        self.spin_per_site_cap.setValue(0); self.spin_per_site_cap.setFixedWidth(Z(60))
+        self.spin_per_site_cap.setToolTip("Max concurrent downloads per source site (0 = unlimited)")
+        perf_row.addWidget(self.spin_per_site_cap)
         perf_row.addStretch()
 
         dglay.addLayout(perf_row)
@@ -11493,6 +11680,8 @@ class MainWindow(QMainWindow):
             cfg['max_retries'] = self.spin_max_retries.value()
         if hasattr(self, 'spin_bw_limit'):
             cfg['bw_limit'] = self.spin_bw_limit.value()
+        if hasattr(self, 'spin_per_site_cap'):
+            cfg['per_site_cap'] = self.spin_per_site_cap.value()
         # Clipboard monitor state
         if hasattr(self, '_clipboard_timer'):
             cfg['clipboard_monitor'] = self._clipboard_timer.isActive()
@@ -12438,10 +12627,12 @@ class MainWindow(QMainWindow):
             return
         concurrent = self.spin_concurrent.value() if hasattr(self, 'spin_concurrent') else 2
         max_retries = self.spin_max_retries.value() if hasattr(self, 'spin_max_retries') else 3
+        per_site = self.spin_per_site_cap.value() if hasattr(self, 'spin_per_site_cap') else 0
         self._dl_worker = DownloadWorker(
             self._dl_dir(), self.db,
             max_concurrent=concurrent,
-            max_retries=max_retries)
+            max_retries=max_retries,
+            per_site_limit=per_site)
         self._dl_worker.log_signal.connect(self._on_dl_log)
         self._dl_worker.progress_signal.connect(self._on_dl_progress)
         self._dl_worker.clip_done.connect(self._on_dl_clip_done)
@@ -12727,6 +12918,8 @@ class MainWindow(QMainWindow):
             self.spin_max_retries.setValue(cfg['max_retries'])
         if 'bw_limit' in cfg and hasattr(self, 'spin_bw_limit'):
             self.spin_bw_limit.setValue(cfg['bw_limit'])
+        if 'per_site_cap' in cfg and hasattr(self, 'spin_per_site_cap'):
+            self.spin_per_site_cap.setValue(_bounded_int(cfg.get('per_site_cap'), 0, 0, 16))
         if 'backup_retention_count' in cfg and hasattr(self, 'spin_backup_retention'):
             self.spin_backup_retention.setValue(max(1, min(500, int(cfg['backup_retention_count']))))
         if hasattr(self, 'chk_respect_crawl_budget'):
