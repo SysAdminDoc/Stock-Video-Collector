@@ -24,6 +24,7 @@ ARTIFACT = ROOT / "dist" / f"{PACKAGE_NAME}.exe"
 RELEASE_METADATA_DIR = ROOT / "build" / "release-verification"
 DEPENDENCY_SNAPSHOT = RELEASE_METADATA_DIR / "dependency-snapshot.json"
 AUDIT_REPORT = RELEASE_METADATA_DIR / "dependency-audit.json"
+AUDIT_CACHE_DIR = RELEASE_METADATA_DIR / f"pip-audit-cache-{os.getpid()}"
 CORE_LOCKED_DEPENDENCIES = {
     "imageio-ffmpeg",
     "keyring",
@@ -156,6 +157,8 @@ def run_dependency_audit() -> None:
         "json",
         "--output",
         str(AUDIT_REPORT),
+        "--cache-dir",
+        str(AUDIT_CACHE_DIR),
         "--progress-spinner",
         "off",
         "--timeout",

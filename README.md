@@ -1,6 +1,6 @@
 # Stock Video Collector
 
-![Version](https://img.shields.io/badge/version-0.7.20-blue)
+![Version](https://img.shields.io/badge/version-0.7.21-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white)
 ![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?logo=qt&logoColor=white)
 ![Playwright](https://img.shields.io/badge/Playwright-Headless_Browser-2EAD33?logo=playwright&logoColor=white)
@@ -121,7 +121,7 @@ The crawler uses four complementary strategies to find video URLs on every page:
 | Duration filter | Quick filter by clip length range |
 | Saved searches | Save and recall frequent search + filter combos |
 | FTS index rebuild | One-click repair if search results drift out of sync |
-| Backup-backed clear | Clearing the database creates a timestamped SQLite backup with an in-app restore action |
+| Backup catalog | Clearing the database creates verified SQLite backups with SHA-256 catalog, selected restore, and retention pruning |
 | License provenance | Source license, attribution requirement, terms URL, and preview/watermark status are stored with clips when known |
 
 ### Asset Management

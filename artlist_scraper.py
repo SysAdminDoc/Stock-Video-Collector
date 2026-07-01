@@ -81,7 +81,7 @@ import secrets as _secrets
 
 APP_NAME = "Stock Video Collector"
 APP_PACKAGE_NAME = "Stock-Video-Collector"
-APP_VERSION = "0.7.20"
+APP_VERSION = "0.7.21"
 APP_WINDOW_TITLE = f"{APP_NAME}  v{APP_VERSION}"
 APP_CONFIG_DIR_NAME = "StockVideoCollector"
 LEGACY_APP_CONFIG_DIR_NAME = "ArtlistScraper"
@@ -1112,10 +1112,58 @@ class DB:
                 dest.close()
         return backup_path
 
+    @staticmethod
+    def inspect_backup(backup_path):
+        """Return checksum, size, timestamp, integrity, and basic counts for a backup file."""
+        if not backup_path or not os.path.isfile(backup_path):
+            raise FileNotFoundError(backup_path or "backup path is empty")
+        path = os.path.abspath(backup_path)
+        stat = os.stat(path)
+        digest = hashlib.sha256()
+        with open(path, 'rb') as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b''):
+                digest.update(chunk)
+        info = {
+            'path': path,
+            'name': os.path.basename(path),
+            'size_bytes': int(stat.st_size),
+            'modified_at': datetime.fromtimestamp(stat.st_mtime).isoformat(timespec='seconds'),
+            'sha256': digest.hexdigest(),
+            'valid': False,
+            'reason': '',
+            'clip_count': 0,
+            'queue_count': 0,
+        }
+        conn = None
+        try:
+            uri = Path(path).resolve().as_uri() + "?mode=ro"
+            conn = sqlite3.connect(uri, uri=True)
+            integrity = conn.execute("PRAGMA integrity_check").fetchone()
+            result = str(integrity[0] if integrity else '').lower()
+            if result != 'ok':
+                raise sqlite3.DatabaseError(f"integrity_check={result or 'empty'}")
+            has_clips = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='clips'").fetchone()[0]
+            has_queue = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='crawl_queue'").fetchone()[0]
+            info['clip_count'] = int(conn.execute("SELECT COUNT(*) FROM clips").fetchone()[0]) if has_clips else 0
+            info['queue_count'] = int(conn.execute("SELECT COUNT(*) FROM crawl_queue").fetchone()[0]) if has_queue else 0
+            info['valid'] = True
+            info['reason'] = 'ok'
+        except Exception as e:
+            info['reason'] = _redact_text(str(e))[:200]
+        finally:
+            if conn is not None:
+                conn.close()
+        return info
+
     def restore_from(self, backup_path):
         """Restore this open database connection from a SQLite backup file."""
         if not backup_path or not os.path.isfile(backup_path):
             raise FileNotFoundError(backup_path or "backup path is empty")
+        info = self.inspect_backup(backup_path)
+        if not info.get('valid'):
+            raise sqlite3.DatabaseError(f"Backup failed integrity check: {info.get('reason') or backup_path}")
         source = sqlite3.connect(backup_path)
         try:
             with self._lock:
@@ -7978,6 +8026,12 @@ class MainWindow(QMainWindow):
             'btn_pause': ("Pause crawl", "Pauses or resumes the active crawl"),
             'btn_stop': ("Stop crawl", "Stops the active crawl"),
             'btn_restore_db': ("Restore last database backup", "Restores the newest pre-clear database backup"),
+            'btn_backup_catalog': ("Database backup catalog", "Opens the backup catalog with checksums and selected restore"),
+            'btn_backup_refresh': ("Refresh database backups", "Refreshes the backup catalog table"),
+            'btn_backup_restore_selected': ("Restore selected database backup", "Restores the selected verified backup from the catalog"),
+            'btn_backup_prune': ("Prune database backups", "Deletes old backups beyond the configured retention count"),
+            'spin_backup_retention': ("Backup retention count", "Number of database backups to keep when pruning"),
+            'backup_table': ("Database backup catalog", "Shows backup timestamp, size, checksum, status, and file name"),
             'chk_verbose_log': ("Verbose crawl log", "Shows debug-level crawl log messages"),
             'log_view': ("Live crawl log", "Timestamped crawl and diagnostic messages"),
             'inp_search': ("Library search", "Searches titles, tags, creators, collections, cameras, and resolutions"),
@@ -8060,6 +8114,8 @@ class MainWindow(QMainWindow):
             'inp_url', 'combo_crawl_mode', 'btn_start', 'btn_pause', 'btn_stop',
             'inp_search', 'combo_sort', 'combo_duration', 'combo_user_collection',
             'btn_catalog', 'btn_select_visible', 'btn_clear_selection',
+            'btn_backup_catalog', 'btn_backup_refresh', 'btn_backup_restore_selected',
+            'btn_backup_prune', 'spin_backup_retention', 'backup_table',
             'btn_import_folder', 'btn_fetch_thumbs', 'detail_notes', 'detail_user_tags',
             'detail_coll_combo', 'inp_dl_dir', 'spin_concurrent', 'spin_max_retries',
             'spin_bw_limit', 'btn_dl_all', 'btn_dl_new', 'btn_dl_sel', 'inp_scan_dir',
@@ -8295,6 +8351,12 @@ class MainWindow(QMainWindow):
         self.btn_restore_db.setMinimumWidth(Z(160))
         self.btn_restore_db.clicked.connect(self._restore_latest_db_backup)
         self._sync_restore_db_button()
+        self.btn_backup_catalog = QPushButton("Backups")
+        self.btn_backup_catalog.setObjectName("neutral")
+        self.btn_backup_catalog.setFixedHeight(Z(40))
+        self.btn_backup_catalog.setMinimumWidth(Z(110))
+        self.btn_backup_catalog.setToolTip("Open the database backup catalog")
+        self.btn_backup_catalog.clicked.connect(self._open_backup_catalog_tab)
         rebuild_fts = QPushButton("🔄  Rebuild Index"); rebuild_fts.setObjectName("neutral"); rebuild_fts.setFixedHeight(Z(40)); rebuild_fts.setToolTip("Rebuild full-text search index if search results seem wrong"); rebuild_fts.clicked.connect(self._rebuild_fts)
         clrlog = QPushButton("Clear Log"); clrlog.setObjectName("neutral"); clrlog.setFixedHeight(Z(40)); clrlog.clicked.connect(lambda: self.log_view.clear())
         self.chk_verbose_log = QCheckBox("Verbose")
@@ -8303,7 +8365,7 @@ class MainWindow(QMainWindow):
         self.chk_verbose_log.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(11)}px;")
 
         for b in (self.btn_start, self.btn_pause, self.btn_stop): btns.addWidget(b)
-        btns.addStretch(); btns.addWidget(self.chk_verbose_log); btns.addWidget(rebuild_fts); btns.addWidget(self.btn_restore_db); btns.addWidget(clrdb); btns.addWidget(clrlog)
+        btns.addStretch(); btns.addWidget(self.chk_verbose_log); btns.addWidget(rebuild_fts); btns.addWidget(self.btn_backup_catalog); btns.addWidget(self.btn_restore_db); btns.addWidget(clrdb); btns.addWidget(clrlog)
         lay.addLayout(btns)
 
         log_lbl = QLabel("Live Log"); log_lbl.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(11)}px; font-weight:600;")
@@ -9343,6 +9405,57 @@ class MainWindow(QMainWindow):
         gv.addWidget(self._sub("Clears local_path + dl_status for missing or invalid files so they re-queue for download."))
         lay.addWidget(grp_verify)
 
+        # Database backups
+        grp_backups = QGroupBox("Database Backups")
+        gb = QVBoxLayout(grp_backups)
+        gb.addWidget(self._sub("Pre-clear backups are verified with SQLite integrity checks and SHA-256 checksums before restore."))
+        brow = QHBoxLayout()
+        brow.addWidget(QLabel("Keep:"))
+        self.spin_backup_retention = QSpinBox()
+        self.spin_backup_retention.setRange(1, 500)
+        self.spin_backup_retention.setValue(10)
+        self.spin_backup_retention.setSuffix(" backups")
+        self.spin_backup_retention.setFixedWidth(Z(120))
+        self.spin_backup_retention.setToolTip("Backups kept when pruning old database backups")
+        brow.addWidget(self.spin_backup_retention)
+        self.btn_backup_refresh = QPushButton("Refresh Catalog")
+        self.btn_backup_refresh.setObjectName("neutral")
+        self.btn_backup_refresh.setFixedHeight(Z(32))
+        self.btn_backup_refresh.clicked.connect(self._refresh_backup_table)
+        brow.addWidget(self.btn_backup_refresh)
+        self.btn_backup_restore_selected = QPushButton("Restore Selected")
+        self.btn_backup_restore_selected.setObjectName("warning")
+        self.btn_backup_restore_selected.setFixedHeight(Z(32))
+        self.btn_backup_restore_selected.clicked.connect(self._restore_selected_db_backup)
+        brow.addWidget(self.btn_backup_restore_selected)
+        self.btn_backup_prune = QPushButton("Prune Old")
+        self.btn_backup_prune.setObjectName("danger")
+        self.btn_backup_prune.setFixedHeight(Z(32))
+        self.btn_backup_prune.clicked.connect(self._prune_db_backups_action)
+        brow.addWidget(self.btn_backup_prune)
+        open_backups = QPushButton("Open Folder")
+        open_backups.setObjectName("neutral")
+        open_backups.setFixedHeight(Z(32))
+        open_backups.clicked.connect(lambda: self._open_path(self._db_backup_dir()))
+        brow.addWidget(open_backups)
+        brow.addStretch()
+        gb.addLayout(brow)
+        self.backup_table = QTableWidget(0, 6)
+        self.backup_table.setHorizontalHeaderLabels(["Created", "Size", "SHA-256", "Status", "Clips", "File"])
+        self.backup_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.backup_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.backup_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.backup_table.verticalHeader().setVisible(False)
+        self.backup_table.setAlternatingRowColors(True)
+        self.backup_table.setMinimumHeight(Z(150))
+        self.backup_table.horizontalHeader().setStretchLastSection(True)
+        self.lbl_backup_result = QLabel("")
+        self.lbl_backup_result.setWordWrap(True)
+        self.lbl_backup_result.setStyleSheet(f"color:{C('text_muted')};")
+        gb.addWidget(self.backup_table)
+        gb.addWidget(self.lbl_backup_result)
+        lay.addWidget(grp_backups)
+
         # Scan folder
         grp_scan = QGroupBox("Scan Folder  (import sidecars from disk)")
         gscan = QVBoxLayout(grp_scan)
@@ -9778,6 +9891,8 @@ class MainWindow(QMainWindow):
         # UI zoom level
         if hasattr(self, '_zoom_combo'):
             cfg['ui_zoom'] = self._zoom_combo.currentData() or 1.0
+        if hasattr(self, 'spin_backup_retention'):
+            cfg['backup_retention_count'] = self.spin_backup_retention.value()
         return cfg
 
     # ── Browser management ──────────────────────────────────────────────────
@@ -10894,6 +11009,8 @@ class MainWindow(QMainWindow):
             self.spin_max_retries.setValue(cfg['max_retries'])
         if 'bw_limit' in cfg and hasattr(self, 'spin_bw_limit'):
             self.spin_bw_limit.setValue(cfg['bw_limit'])
+        if 'backup_retention_count' in cfg and hasattr(self, 'spin_backup_retention'):
+            self.spin_backup_retention.setValue(max(1, min(500, int(cfg['backup_retention_count']))))
         # Clipboard monitor (opt-in)
         if cfg.get('clipboard_monitor', False) and hasattr(self, '_clipboard_timer'):
             if not self._clipboard_timer.isActive():
@@ -10921,6 +11038,9 @@ class MainWindow(QMainWindow):
     def _db_backup_dir(self):
         return os.path.join(get_config_dir(), 'backups')
 
+    def _db_backup_catalog_path(self):
+        return os.path.join(self._db_backup_dir(), 'backup_catalog.json')
+
     def _make_db_backup_path(self):
         backup_dir = self._db_backup_dir()
         stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
@@ -10944,6 +11064,138 @@ class MainWindow(QMainWindow):
             return ''
         return max(candidates, key=lambda p: os.path.getmtime(p))
 
+    def _backup_retention_count(self):
+        if hasattr(self, 'spin_backup_retention'):
+            return max(1, int(self.spin_backup_retention.value()))
+        try:
+            return max(1, min(500, int((load_config() or {}).get('backup_retention_count', 10))))
+        except Exception:
+            return 10
+
+    @staticmethod
+    def _human_bytes(size):
+        size = float(size or 0)
+        for unit in ('B', 'KB', 'MB', 'GB'):
+            if size < 1024 or unit == 'GB':
+                return f"{size:.0f} {unit}" if unit == 'B' else f"{size:.1f} {unit}"
+            size /= 1024
+        return f"{size:.1f} GB"
+
+    def _catalog_db_backups(self):
+        backup_dir = self._db_backup_dir()
+        os.makedirs(backup_dir, exist_ok=True)
+        entries = []
+        for name in os.listdir(backup_dir):
+            if not name.lower().endswith('.db'):
+                continue
+            path = os.path.join(backup_dir, name)
+            try:
+                entries.append(DB.inspect_backup(path))
+            except Exception as e:
+                try:
+                    stat = os.stat(path)
+                    entries.append({
+                        'path': os.path.abspath(path),
+                        'name': name,
+                        'size_bytes': int(stat.st_size),
+                        'modified_at': datetime.fromtimestamp(stat.st_mtime).isoformat(timespec='seconds'),
+                        'sha256': '',
+                        'valid': False,
+                        'reason': _redact_text(str(e))[:200],
+                        'clip_count': 0,
+                        'queue_count': 0,
+                    })
+                except Exception:
+                    pass
+        entries.sort(key=lambda item: (item.get('modified_at') or '', item.get('name') or ''), reverse=True)
+        catalog = {
+            'generated_at': datetime.now().isoformat(timespec='seconds'),
+            'retention_count': self._backup_retention_count(),
+            'backups': entries,
+        }
+        try:
+            with open(self._db_backup_catalog_path(), 'w', encoding='utf-8') as fh:
+                json.dump(catalog, fh, indent=2)
+        except Exception as e:
+            self._on_log(f"Backup catalog write failed: {e}", 'WARN')
+        return entries
+
+    def _prune_db_backups(self, retention_count=None):
+        keep = max(1, int(retention_count or self._backup_retention_count()))
+        entries = self._catalog_db_backups()
+        backup_dir = os.path.abspath(self._db_backup_dir())
+        removed = []
+        for entry in entries[keep:]:
+            path = os.path.abspath(entry.get('path') or '')
+            if not path.endswith('.db'):
+                continue
+            if os.path.dirname(path) != backup_dir:
+                continue
+            try:
+                os.remove(path)
+                removed.append(path)
+            except FileNotFoundError:
+                removed.append(path)
+            except Exception as e:
+                self._on_log(f"Backup prune skipped {path}: {e}", 'WARN')
+        if removed:
+            self._catalog_db_backups()
+            self._latest_db_backup_path = self._find_latest_db_backup()
+            self._sync_restore_db_button()
+        return removed
+
+    def _refresh_backup_table(self):
+        entries = self._catalog_db_backups()
+        if not hasattr(self, 'backup_table'):
+            return entries
+        self.backup_table.setRowCount(len(entries))
+        for row, entry in enumerate(entries):
+            values = [
+                entry.get('modified_at', ''),
+                self._human_bytes(entry.get('size_bytes', 0)),
+                entry.get('sha256', ''),
+                'OK' if entry.get('valid') else f"Invalid: {entry.get('reason', '')}",
+                str(entry.get('clip_count', 0)),
+                entry.get('name', ''),
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if col == 5:
+                    item.setData(_LOCAL_PATH_ROLE, entry.get('path', ''))
+                    item.setToolTip(entry.get('path', ''))
+                if col == 2:
+                    item.setToolTip(entry.get('sha256', ''))
+                if col == 3:
+                    item.setForeground(QColor(C('success') if entry.get('valid') else C('error')))
+                self.backup_table.setItem(row, col, item)
+        self.backup_table.resizeColumnsToContents()
+        if entries:
+            latest = entries[0]
+            self.lbl_backup_result.setStyleSheet(f"color:{C('text_muted')};")
+            self.lbl_backup_result.setText(
+                f"{len(entries)} backup(s). Latest: {latest.get('modified_at')}  "
+                f"{self._human_bytes(latest.get('size_bytes', 0))}  sha256={latest.get('sha256', '')}")
+        else:
+            self.lbl_backup_result.setStyleSheet(f"color:{C('warning')};")
+            self.lbl_backup_result.setText("No database backups found.")
+        return entries
+
+    def _open_backup_catalog_tab(self):
+        try:
+            self.tabs.setCurrentIndex(4)
+        except Exception:
+            pass
+        self._refresh_backup_table()
+
+    def _selected_db_backup_path(self):
+        if not hasattr(self, 'backup_table'):
+            return ''
+        row = self.backup_table.currentRow()
+        if row < 0:
+            return ''
+        item = self.backup_table.item(row, 5)
+        return item.data(_LOCAL_PATH_ROLE) if item else ''
+
     def _sync_restore_db_button(self):
         if not self._latest_db_backup_path or not os.path.isfile(self._latest_db_backup_path):
             self._latest_db_backup_path = self._find_latest_db_backup()
@@ -10965,11 +11217,17 @@ class MainWindow(QMainWindow):
         try:
             backup_path = self._make_db_backup_path()
             self.db.backup_to(backup_path)
+            self._catalog_db_backups()
+            removed = self._prune_db_backups(self._backup_retention_count())
             self.db.clear_all()
             self._latest_db_backup_path = backup_path
             self._sync_restore_db_button()
+            if hasattr(self, 'backup_table'):
+                self._refresh_backup_table()
             self._refresh_after_database_change()
             msg = f"Database cleared. Backup saved: {backup_path}"
+            if removed:
+                msg += f" Pruned {len(removed)} old backup(s)."
             self._on_log(msg, 'WARN')
             self.status_bar.showMessage("Database cleared. Restore Last Backup is available.", 6000)
             self._toast("Database cleared. Restore Last Backup is available.", 'warning', 5000)
@@ -10990,6 +11248,8 @@ class MainWindow(QMainWindow):
             self.db.restore_from(backup_path)
             self._latest_db_backup_path = backup_path
             self._sync_restore_db_button()
+            if hasattr(self, 'backup_table'):
+                self._refresh_backup_table()
             self._refresh_after_database_change()
             msg = f"Database restored from backup: {backup_path}"
             self._on_log(msg, 'OK')
@@ -11000,6 +11260,48 @@ class MainWindow(QMainWindow):
             self._on_log(msg, 'ERROR')
             self.status_bar.showMessage(msg, 6000)
             self._toast("Database restore failed -- check log", 'error', 5000)
+
+    def _restore_selected_db_backup(self):
+        backup_path = self._selected_db_backup_path()
+        if not backup_path:
+            self.status_bar.showMessage("Select a database backup first.", 4000)
+            self._toast("Select a database backup first", 'warning', 2500)
+            return
+        try:
+            info = DB.inspect_backup(backup_path)
+            if not info.get('valid'):
+                raise sqlite3.DatabaseError(info.get('reason') or 'integrity check failed')
+            self.db.restore_from(backup_path)
+            self._latest_db_backup_path = backup_path
+            self._sync_restore_db_button()
+            self._refresh_backup_table()
+            self._refresh_after_database_change()
+            msg = f"Database restored from selected backup: {backup_path}"
+            self._on_log(msg, 'OK')
+            self.status_bar.showMessage("Database restored from selected backup.", 6000)
+            self._toast("Database restored from selected backup.", 'success', 4000)
+        except Exception as e:
+            msg = f"Selected database restore failed: {e}"
+            self._on_log(msg, 'ERROR')
+            self.status_bar.showMessage(msg, 6000)
+            self._toast("Selected restore failed -- check log", 'error', 5000)
+
+    def _prune_db_backups_action(self):
+        try:
+            removed = self._prune_db_backups(self._backup_retention_count())
+            if hasattr(self, 'backup_table'):
+                self._refresh_backup_table()
+            if removed:
+                self._toast(f"Pruned {len(removed)} old backup(s)", 'success', 3000)
+                self.status_bar.showMessage(f"Pruned {len(removed)} old database backup(s).", 5000)
+            else:
+                self._toast("No old backups to prune", 'success', 2500)
+                self.status_bar.showMessage("No old database backups to prune.", 4000)
+        except Exception as e:
+            msg = f"Backup prune failed: {e}"
+            self._on_log(msg, 'ERROR')
+            self.status_bar.showMessage(msg, 6000)
+            self._toast("Backup prune failed -- check log", 'error', 5000)
 
     def _rebuild_fts(self):
         """Rebuild the full-text search index if search results seem out of sync."""
@@ -11030,6 +11332,8 @@ class MainWindow(QMainWindow):
         try:
             if hasattr(self, 'arc_stat_clips'):
                 self._refresh_archive_stats()
+            if hasattr(self, 'backup_table'):
+                self._refresh_backup_table()
         except Exception:
             pass
 

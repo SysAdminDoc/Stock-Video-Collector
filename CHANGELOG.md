@@ -2,6 +2,11 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.7.21] - 2026-06-30
+
+- Added: Database backup catalog with SHA-256, SQLite integrity status, selected restore, and retention pruning controls.
+- Changed: Backup restore now verifies SQLite integrity before copying data into the active database.
+
 ## [v0.7.20] - 2026-06-30
 
 - Added: Pinned `requirements-lock.txt` release environment with `pip-audit` as a local release-time dependency.
