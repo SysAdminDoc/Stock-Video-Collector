@@ -81,7 +81,7 @@ import secrets as _secrets
 
 APP_NAME = "Stock Video Collector"
 APP_PACKAGE_NAME = "Stock-Video-Collector"
-APP_VERSION = "0.7.24"
+APP_VERSION = "0.7.25"
 APP_WINDOW_TITLE = f"{APP_NAME}  v{APP_VERSION}"
 APP_CONFIG_DIR_NAME = "StockVideoCollector"
 LEGACY_APP_CONFIG_DIR_NAME = "ArtlistScraper"
@@ -2905,6 +2905,167 @@ def _normalize_sidecar_payload(data):
         if not payload.get(dest) and license_block.get(src):
             payload[dest] = license_block.get(src)
     return payload
+
+
+def _safe_handoff_component(value, fallback='clip'):
+    text = str(value or fallback).strip()
+    text = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', '_', text)
+    text = re.sub(r'\s+', '_', text).strip('._ ')
+    return (text or fallback)[:80]
+
+
+def _unique_path(path, used):
+    candidate = Path(path)
+    key = str(candidate).lower()
+    if key not in used and not candidate.exists():
+        used.add(key)
+        return candidate
+    stem, suffix = candidate.stem, candidate.suffix
+    for idx in range(2, 10000):
+        trial = candidate.with_name(f"{stem}-{idx}{suffix}")
+        key = str(trial).lower()
+        if key not in used and not trial.exists():
+            used.add(key)
+            return trial
+    raise RuntimeError(f"Could not allocate unique path for {path}")
+
+
+def _write_json_file(path, payload):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding='utf-8')
+
+
+def _handoff_add_checksum(entries, root, path):
+    digest = _sha256_file(str(path))
+    if digest:
+        rel = Path(path).relative_to(root).as_posix()
+        entries.append((digest, rel))
+        return digest
+    return ''
+
+
+def build_handoff_package(rows, out_dir, package_stem=None):
+    clips = [_clip_export_dict(r) for r in (rows or [])]
+    if not clips:
+        raise ValueError("No clips available for handoff export")
+
+    out_base = Path(out_dir)
+    out_base.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    stem = _safe_handoff_component(package_stem or f"video-handoff-{stamp}", f"video-handoff-{stamp}")
+    root = out_base / stem
+    suffix = 2
+    while root.exists():
+        root = out_base / f"{stem}-{suffix}"
+        suffix += 1
+    root.mkdir(parents=True)
+
+    (root / 'clips').mkdir()
+    (root / 'thumbnails').mkdir()
+    (root / 'sidecars').mkdir()
+    (root / 'licenses').mkdir()
+
+    used_paths = set()
+    checksums = []
+    manifest_clips = []
+    attribution_lines = []
+
+    for row in clips:
+        clip_id = _safe_handoff_component(row.get('clip_id'), 'clip')
+        title = row.get('title') or clip_id
+        clip_entry = {
+            'clip_id': row.get('clip_id', ''),
+            'title': title,
+            'source_url': row.get('source_url', ''),
+            'source_site': row.get('source_site', ''),
+            'files': {},
+            'checksums': {},
+            'provenance': row.get('provenance') or _build_provenance_report(row, row.get('local_path', '')),
+        }
+
+        local_path = Path(str(row.get('local_path', '') or ''))
+        if local_path.is_file():
+            ext = local_path.suffix or '.mp4'
+            dest = _unique_path(root / 'clips' / _safe_filename(title, clip_id, ext), used_paths)
+            shutil.copy2(local_path, dest)
+            rel = dest.relative_to(root).as_posix()
+            clip_entry['files']['media'] = rel
+            clip_entry['checksums']['media'] = _handoff_add_checksum(checksums, root, dest)
+
+        thumb_path = Path(str(row.get('thumb_path', '') or ''))
+        if thumb_path.is_file():
+            ext = thumb_path.suffix or '.jpg'
+            dest = _unique_path(root / 'thumbnails' / f"{clip_id}{ext}", used_paths)
+            shutil.copy2(thumb_path, dest)
+            rel = dest.relative_to(root).as_posix()
+            clip_entry['files']['thumbnail'] = rel
+            clip_entry['checksums']['thumbnail'] = _handoff_add_checksum(checksums, root, dest)
+
+        sidecar = dict(row)
+        sidecar['handoff_files'] = dict(clip_entry['files'])
+        sidecar['handoff_checksums'] = dict(clip_entry['checksums'])
+        sidecar_path = _unique_path(root / 'sidecars' / f"{clip_id}.json", used_paths)
+        _write_json_file(sidecar_path, sidecar)
+        clip_entry['files']['sidecar'] = sidecar_path.relative_to(root).as_posix()
+        clip_entry['checksums']['sidecar'] = _handoff_add_checksum(checksums, root, sidecar_path)
+
+        license_bits = [
+            row.get('license_name', ''),
+            row.get('license_url', ''),
+            row.get('terms_url', ''),
+            row.get('attribution_required', ''),
+            row.get('attribution_text', ''),
+        ]
+        if any(str(bit or '').strip() for bit in license_bits):
+            attribution_lines.append(
+                f"{row.get('clip_id', clip_id)}\t{row.get('title', '')}\t"
+                f"{row.get('license_name', '')}\t{row.get('license_url', '')}\t"
+                f"{row.get('terms_url', '')}\t{row.get('attribution_required', '')}\t"
+                f"{row.get('attribution_text', '')}"
+            )
+        manifest_clips.append(clip_entry)
+
+    attribution_path = root / 'licenses' / 'ATTRIBUTION.txt'
+    if attribution_lines:
+        attribution_path.write_text(
+            "clip_id\ttitle\tlicense_name\tlicense_url\tterms_url\tattribution_required\tattribution_text\n"
+            + "\n".join(attribution_lines) + "\n",
+            encoding='utf-8')
+    else:
+        attribution_path.write_text("No explicit license or attribution metadata was available.\n", encoding='utf-8')
+    _handoff_add_checksum(checksums, root, attribution_path)
+
+    manifest = {
+        'schema': 'stock-video-collector.handoff.v1',
+        'created_at': datetime.now().isoformat(timespec='seconds'),
+        'app_version': APP_VERSION,
+        'total_clips': len(manifest_clips),
+        'media_write_policy': 'copy-only; source media is never modified in place',
+        'clips': manifest_clips,
+    }
+    manifest_path = root / 'manifest.json'
+    _write_json_file(manifest_path, manifest)
+    _handoff_add_checksum(checksums, root, manifest_path)
+
+    checksum_path = root / 'checksums.sha256'
+    checksum_path.write_text(
+        ''.join(f"{digest}  {rel}\n" for digest, rel in sorted(checksums, key=lambda item: item[1])),
+        encoding='utf-8')
+
+    import zipfile
+    zip_path = root.with_suffix('.zip')
+    with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+        for path in sorted(root.rglob('*')):
+            if path.is_file():
+                zf.write(path, path.relative_to(root).as_posix())
+
+    return {
+        'folder': str(root),
+        'archive': str(zip_path),
+        'clips': len(manifest_clips),
+        'files': sum(1 for path in root.rglob('*') if path.is_file()),
+    }
 
 
 M3U8_RE = VIDEO_PATTERNS['m3u8']
@@ -10221,6 +10382,7 @@ class MainWindow(QMainWindow):
             ("Full metadata  (.json)",             "success", self._export_json),
             ("Media player playlist  (.m3u)",     "success", self._export_m3u),
             ("Spreadsheet  (.csv -- all fields)",  "success", self._export_csv),
+            ("Project handoff package  (.zip)",    "success", self._export_handoff),
             ("Export all four formats at once",   None,      self._export_all),
         ]:
             btn = QPushButton(text)
@@ -10237,6 +10399,7 @@ class MainWindow(QMainWindow):
             ("Filtered metadata  (.json)",       "neutral", lambda: self._export_json(filtered=True)),
             ("Filtered playlist  (.m3u)",        "neutral", lambda: self._export_m3u(filtered=True)),
             ("Filtered spreadsheet  (.csv)",     "neutral", lambda: self._export_csv(filtered=True)),
+            ("Filtered handoff package  (.zip)", "neutral", lambda: self._export_handoff(filtered=True)),
         ]:
             btn = QPushButton(text)
             if obj: btn.setObjectName(obj)
@@ -11016,6 +11179,24 @@ class MainWindow(QMainWindow):
                     rd = r if isinstance(r, dict) else dict(zip(r.keys(), tuple(r)))
                     wr.writerow({k: rd.get(k, '') for k in fields})
             return f"Saved {len(rows_snapshot)} rows  ->  {f}"
+        w = BackgroundWorker(_run)
+        w.result_signal.connect(lambda msg: self.lbl_export_status.setText(msg))
+        w.error_signal.connect(lambda e: self.lbl_export_status.setText(f"Export error: {e}"))
+        self._bg_workers.append(w)
+        w.finished.connect(lambda: self._bg_workers.remove(w) if w in self._bg_workers else None)
+        w.start()
+
+    def _export_handoff(self, filtered=False):
+        tag = "filtered " if filtered else ""
+        self.lbl_export_status.setText(f"Exporting {tag}handoff package...")
+        rows_snapshot = self._get_export_rows(filtered)
+        def _run():
+            if not rows_snapshot: return "No data."
+            stem = f"video-handoff-filtered-{self._ts()}" if filtered else f"video-handoff-{self._ts()}"
+            result = build_handoff_package(rows_snapshot, self._out_dir(), stem)
+            return (
+                f"Saved handoff package ({result['clips']} clips, {result['files']} files)  ->  "
+                f"{result['archive']}")
         w = BackgroundWorker(_run)
         w.result_signal.connect(lambda msg: self.lbl_export_status.setText(msg))
         w.error_signal.connect(lambda e: self.lbl_export_status.setText(f"Export error: {e}"))

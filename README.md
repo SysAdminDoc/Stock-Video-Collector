@@ -1,6 +1,6 @@
 # Stock Video Collector
 
-![Version](https://img.shields.io/badge/version-0.7.24-blue)
+![Version](https://img.shields.io/badge/version-0.7.25-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white)
 ![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?logo=qt&logoColor=white)
 ![Playwright](https://img.shields.io/badge/Playwright-Headless_Browser-2EAD33?logo=playwright&logoColor=white)
@@ -168,6 +168,7 @@ The crawler uses four complementary strategies to find video URLs on every page:
 | `.m3u` | Media player playlist — uses local path if downloaded, M3U8 URL otherwise |
 | `.csv` | Spreadsheet-ready with clip, source, license/provenance, embedded rights, and duplicate-review metadata columns |
 | **Batch** | Export all four formats at once |
+| **Handoff package** | Portable folder + ZIP with copied media, thumbnails, sidecars, provenance manifest, attribution file, and SHA-256 checksums |
 
 ### GUI
 

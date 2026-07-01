@@ -2,6 +2,11 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.7.25] - 2026-06-30
+
+- Added: Project handoff package export that writes a portable folder and ZIP with copied media, thumbnails, generated sidecars, `manifest.json`, `licenses/ATTRIBUTION.txt`, and `checksums.sha256`.
+- Added: Filtered handoff package export for current search/collection results.
+
 ## [v0.7.24] - 2026-06-30
 
 - Added: Portable mode via `--portable`, `STOCK_VIDEO_COLLECTOR_PORTABLE=1`, or an app-adjacent `portable.flag` sentinel, storing config, database, thumbnails, and default output under `portable-data`.

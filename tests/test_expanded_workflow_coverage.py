@@ -6,6 +6,7 @@ import sys
 import tempfile
 import types
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -142,6 +143,7 @@ def _bind_export_window(out_dir, rows):
     dummy._export_json = types.MethodType(app.MainWindow._export_json, dummy)
     dummy._export_m3u = types.MethodType(app.MainWindow._export_m3u, dummy)
     dummy._export_csv = types.MethodType(app.MainWindow._export_csv, dummy)
+    dummy._export_handoff = types.MethodType(app.MainWindow._export_handoff, dummy)
     return dummy
 
 
@@ -197,6 +199,61 @@ class ExportFormatTests(unittest.TestCase):
                 rows = list(csv.DictReader(fh))
             self.assertEqual(rows[0]["clip_id"], "clip-1")
             self.assertEqual(rows[0]["preview_status"], "Direct MP4")
+
+    def test_handoff_package_contains_media_sidecars_manifest_and_checksums(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out_dir = root / "exports"
+            local_clip = root / "downloaded.mp4"
+            thumb = root / "thumb.jpg"
+            local_clip.write_bytes(b"media-bytes")
+            thumb.write_bytes(b"thumb-bytes")
+            row = {
+                "clip_id": "clip-1",
+                "title": "Handoff Clip",
+                "creator": "Unit Test",
+                "collection": "Handoffs",
+                "tags": "handoff,metadata",
+                "resolution": "1920x1080",
+                "duration": "0:05",
+                "frame_rate": "30",
+                "formats": "mp4",
+                "m3u8_url": "https://cdn.example.test/handoff.mp4",
+                "source_url": "https://example.test/handoff",
+                "source_site": "Pexels",
+                "license_name": "Pexels License",
+                "license_url": "https://www.pexels.com/license/",
+                "attribution_required": "No",
+                "terms_url": "https://www.pexels.com/terms-of-service/",
+                "preview_status": "Direct MP4",
+                "local_path": str(local_clip),
+                "thumb_path": str(thumb),
+                "file_sha256": app._sha256_file(str(local_clip)),
+            }
+            dummy = _bind_export_window(out_dir, [row])
+
+            with patch.object(app, "BackgroundWorker", _SynchronousBackgroundWorker):
+                dummy._export_handoff(filtered=True)
+
+            archives = list(out_dir.glob("video-handoff-filtered-20260101-000000.zip"))
+            self.assertEqual(len(archives), 1)
+            with zipfile.ZipFile(archives[0]) as zf:
+                names = set(zf.namelist())
+                self.assertIn("manifest.json", names)
+                self.assertIn("checksums.sha256", names)
+                self.assertIn("licenses/ATTRIBUTION.txt", names)
+                self.assertTrue(any(name.startswith("clips/") and name.endswith(".mp4") for name in names))
+                self.assertTrue(any(name.startswith("thumbnails/") and name.endswith(".jpg") for name in names))
+                self.assertIn("sidecars/clip-1.json", names)
+
+                manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
+                self.assertEqual(manifest["schema"], "stock-video-collector.handoff.v1")
+                self.assertEqual(manifest["total_clips"], 1)
+                self.assertEqual(manifest["clips"][0]["provenance"]["license"]["name"], "Pexels License")
+                self.assertIn("copy-only", manifest["media_write_policy"])
+                checksums = zf.read("checksums.sha256").decode("utf-8")
+                self.assertIn("manifest.json", checksums)
+                self.assertIn("sidecars/clip-1.json", checksums)
 
 
 class ImportWorkerMetadataTests(unittest.TestCase):
