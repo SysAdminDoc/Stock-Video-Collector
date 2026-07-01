@@ -2893,6 +2893,24 @@ def _keyring_secret_value(blob):
         return ''
 
 
+def _restrict_file_permissions(path):
+    if sys.platform == 'win32':
+        try:
+            username = os.environ.get('USERNAME', '')
+            if username:
+                subprocess.run(
+                    ['icacls', path, '/inheritance:r',
+                     '/grant:r', f'{username}:(R,W)'],
+                    capture_output=True, timeout=10)
+        except Exception:
+            pass
+    else:
+        try:
+            os.chmod(path, 0o600)
+        except Exception:
+            pass
+
+
 def _load_secret_key():
     path = _secret_key_path()
     if os.path.isfile(path):
@@ -2901,10 +2919,7 @@ def _load_secret_key():
     key = _secrets.token_bytes(32)
     with open(path, 'wb') as fh:
         fh.write(base64.b64encode(key))
-    try:
-        os.chmod(path, 0o600)
-    except Exception:
-        pass
+    _restrict_file_permissions(path)
     return key
 
 
@@ -2989,10 +3004,7 @@ def _save_secret_vault(vault):
     path = _secret_vault_path()
     with open(path, 'w', encoding='utf-8') as fh:
         json.dump(vault, fh, indent=2)
-    try:
-        os.chmod(path, 0o600)
-    except Exception:
-        pass
+    _restrict_file_permissions(path)
 
 
 def _secret_id_for_path(path_parts):
