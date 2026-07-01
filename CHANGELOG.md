@@ -2,6 +2,28 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.8.1] - 2026-07-01
+
+### Fixed
+- **P0 crash**: Removed broken Config tab scheduler referencing undefined `_run_scheduled_crawl` and `_configure_scheduled_crawl` methods — app crashed on startup.
+- **P0 deadlock**: FTS auto-recovery called `rebuild_fts()` which tried to re-acquire an already-held `threading.Lock`, freezing the entire application. Split into `_rebuild_fts_unlocked()` for use inside existing lock scopes.
+- **P1 FTS injection**: Search queries containing double quotes produced malformed FTS5 MATCH expressions, silently returning all clips instead of matches. Now strips quotes from search terms.
+- **P1 SSRF fail-open**: DNS resolution errors in `_host_is_unsafe()` were treated as "safe" (returned empty string). Now returns "DNS resolution failed" to fail closed.
+- **P1 concurrency**: Deferred download items bypassed `max_concurrent` limit, causing unbounded future submission. Added bounds check.
+- **P1 resource leak**: Per-site download semaphores not released at shutdown for remaining futures.
+- **P1 stale data**: Saved-search feed notification read `_last_rows` before debounced search completed. Deferred count check to 500ms after search trigger.
+- **P1 shutdown**: `closeEvent` did not stop `_crawl_schedule_timer`, `_file_watcher`, `_search_timer`, `_clip_found_timer`, `_notes_save_timer`, `_tags_save_timer`, or `_wal_timer`, risking DB operations on closed connection.
+- **P2 SQL LIKE wildcards**: Tag rename/merge/split used `LIKE '%tag%'` without escaping `%` and `_` metacharacters. A tag named `%` would match all rows. Added `_like_escape()` with ESCAPE clause.
+- **P2 thread safety**: `DownloadWorker.enqueue()` had check-then-act race on `_seen` set and non-atomic `_queue_seq` increment. Added lock synchronization.
+- **P2 GUI freeze**: Watch folder `_on_watch_folder_changed` ran ffprobe synchronously on the GUI thread. Moved to `BackgroundWorker`.
+- **P2 yt-dlp naming**: Fallback download assumed exact output path. Now searches for alternate extensions when yt-dlp produces differently-named output.
+- **P2 transcode orphan**: Post-download transcode replaced `out_path`, orphaning the original file. Now keeps original, records transcode as companion in sidecar.
+- **P2 FTS thread safety**: `_fts_recovering` was a class variable (shared across instances). Moved to instance attribute.
+- **P2 zero coercion**: XML export `_g()` helper treated integer zero as empty string due to Python truthiness. Fixed with `is not None` check.
+
+### Added
+- 19 regression tests covering: tag rename/merge/split, LIKE wildcard escaping, collection locking, priority queue ordering, bandwidth schedule time ranges, FTS query safety with special characters, saved-search feed count tracking, and XML element escaping.
+
 ## [v0.8.0] - 2026-07-01
 
 - Added: yt-dlp fallback — download worker tries yt-dlp when ffmpeg download fails.

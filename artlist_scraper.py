@@ -82,7 +82,7 @@ import secrets as _secrets
 
 APP_NAME = "Stock Video Collector"
 APP_PACKAGE_NAME = "Stock-Video-Collector"
-APP_VERSION = "0.8.0"
+APP_VERSION = "0.8.1"
 APP_WINDOW_TITLE = f"{APP_NAME}  v{APP_VERSION}"
 APP_CONFIG_DIR_NAME = "StockVideoCollector"
 LEGACY_APP_CONFIG_DIR_NAME = "ArtlistScraper"
@@ -13212,7 +13212,7 @@ class MainWindow(QMainWindow):
             track = ET.SubElement(video, 'track')
             for i, r in enumerate(rows_snapshot):
                 keys = r.keys() if hasattr(r, 'keys') else []
-                def _g(k): return str(r[k] if k in keys and r[k] else '')
+                def _g(k): return str(r[k] if k in keys and r[k] is not None else '')
                 title = _g('title') or _g('clip_id') or f'Clip_{i}'
                 local = _g('local_path')
                 url = local if (local and os.path.isfile(local)) else _g('m3u8_url')
@@ -13283,7 +13283,7 @@ class MainWindow(QMainWindow):
             offset_frames = 0
             for i, r in enumerate(rows_snapshot):
                 keys = r.keys() if hasattr(r, 'keys') else []
-                def _g(k): return str(r[k] if k in keys and r[k] else '')
+                def _g(k): return str(r[k] if k in keys and r[k] is not None else '')
                 title = _g('title') or _g('clip_id') or f'Clip_{i}'
                 local = _g('local_path')
                 url = local if (local and os.path.isfile(local)) else _g('m3u8_url')
