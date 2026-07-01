@@ -1,6 +1,6 @@
 # Stock Video Collector
 
-![Version](https://img.shields.io/badge/version-0.7.18-blue)
+![Version](https://img.shields.io/badge/version-0.7.19-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white)
 ![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?logo=qt&logoColor=white)
 ![Playwright](https://img.shields.io/badge/Playwright-Headless_Browser-2EAD33?logo=playwright&logoColor=white)
@@ -130,6 +130,7 @@ The crawler uses four complementary strategies to find video URLs on every page:
 | User tags | Custom tag system independent of source tags |
 | Collections | Organize clips into named collections with color coding |
 | Bulk operations | Context menu actions on any card in the grid |
+| Duplicate review | Exact SHA-256 and near visual-hash groups with Library filter and keep/ignore/review actions |
 
 ### Download Manager
 
@@ -152,7 +153,7 @@ The crawler uses four complementary strategies to find video URLs on every page:
 | `.txt` | Plain list of M3U8/MP4 URLs |
 | `.json` | Full metadata for all clips (title, creator, tags, URLs, timestamps, license/provenance fields) |
 | `.m3u` | Media player playlist — uses local path if downloaded, M3U8 URL otherwise |
-| `.csv` | Spreadsheet-ready with clip, source, and license/provenance metadata columns |
+| `.csv` | Spreadsheet-ready with clip, source, license/provenance, and duplicate-review metadata columns |
 | **Batch** | Export all four formats at once |
 
 ### GUI

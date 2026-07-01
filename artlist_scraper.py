@@ -81,7 +81,7 @@ import secrets as _secrets
 
 APP_NAME = "Stock Video Collector"
 APP_PACKAGE_NAME = "Stock-Video-Collector"
-APP_VERSION = "0.7.18"
+APP_VERSION = "0.7.19"
 APP_WINDOW_TITLE = f"{APP_NAME}  v{APP_VERSION}"
 APP_CONFIG_DIR_NAME = "StockVideoCollector"
 LEGACY_APP_CONFIG_DIR_NAME = "ArtlistScraper"
@@ -975,7 +975,11 @@ class DB:
                           ('attribution_required', 'TEXT DEFAULT ""'),
                           ('attribution_text', 'TEXT DEFAULT ""'),
                           ('terms_url', 'TEXT DEFAULT ""'),
-                          ('preview_status', 'TEXT DEFAULT ""')]:
+                          ('preview_status', 'TEXT DEFAULT ""'),
+                          ('file_sha256', 'TEXT DEFAULT ""'),
+                          ('perceptual_hash', 'TEXT DEFAULT ""'),
+                          ('duplicate_group', 'TEXT DEFAULT ""'),
+                          ('duplicate_status', 'TEXT DEFAULT ""')]:
             try:
                 self.conn.execute(f"ALTER TABLE clips ADD COLUMN {col} {defn}")
             except sqlite3.OperationalError:
@@ -1410,10 +1414,11 @@ class DB:
     _VALID_COLUMNS = frozenset({
         'creator','collection','resolution','frame_rate','dl_status',
         'title','tags','camera','duration','formats','clip_id',
-        'user_rating','user_tags','favorited','source_site',
-        'license_name','license_url','attribution_required',
-        'attribution_text','terms_url','preview_status',
-    })
+            'user_rating','user_tags','favorited','source_site',
+            'license_name','license_url','attribution_required',
+            'attribution_text','terms_url','preview_status',
+            'file_sha256','perceptual_hash','duplicate_group','duplicate_status',
+        })
 
     def distinct_values(self, col):
         if col not in self._VALID_COLUMNS: return []
@@ -1463,6 +1468,114 @@ class DB:
                 self.conn.commit()
         except Exception as e:
             print(f"[DB WARN] update_local_path failed for {clip_id}: {e}")
+
+    @staticmethod
+    def _phash_distance(left, right):
+        try:
+            return (int(str(left), 16) ^ int(str(right), 16)).bit_count()
+        except Exception:
+            return 65
+
+    def update_duplicate_fingerprints(self, clip_id, file_sha256='', perceptual_hash=''):
+        """Persist duplicate fingerprints and refresh duplicate grouping."""
+        if not clip_id:
+            return
+        try:
+            with self._lock:
+                self.conn.execute(
+                    "UPDATE clips SET file_sha256=?, perceptual_hash=? WHERE clip_id=?",
+                    (str(file_sha256 or ''), str(perceptual_hash or ''), clip_id))
+                self.conn.commit()
+            self.recompute_duplicate_groups()
+        except Exception as e:
+            print(f"[DB WARN] update_duplicate_fingerprints failed for {clip_id}: {e}")
+
+    def set_duplicate_status(self, clip_id, status):
+        status = str(status or '').strip().lower()
+        if status not in ('review', 'keep', 'ignore', ''):
+            status = 'review'
+        try:
+            with self._lock:
+                self.conn.execute("UPDATE clips SET duplicate_status=? WHERE clip_id=?", (status, clip_id))
+                self.conn.commit()
+        except Exception as e:
+            print(f"[DB WARN] set_duplicate_status failed for {clip_id}: {e}")
+
+    def recompute_duplicate_groups(self, near_threshold=6):
+        """Group exact SHA-256 matches and near visual hashes for duplicate review."""
+        try:
+            with self._lock:
+                rows = self.conn.execute("""
+                    SELECT clip_id, file_sha256, perceptual_hash
+                    FROM clips
+                    WHERE clip_id IS NOT NULL AND clip_id != ''
+                """).fetchall()
+                parent = {}
+
+                def find(x):
+                    parent.setdefault(x, x)
+                    if parent[x] != x:
+                        parent[x] = find(parent[x])
+                    return parent[x]
+
+                def union(a, b):
+                    ra, rb = find(a), find(b)
+                    if ra != rb:
+                        parent[rb] = ra
+
+                for row in rows:
+                    find(row['clip_id'])
+
+                by_sha = {}
+                by_phash = []
+                for row in rows:
+                    cid = row['clip_id']
+                    sha = str(row['file_sha256'] or '').strip()
+                    phash = str(row['perceptual_hash'] or '').strip()
+                    if sha:
+                        by_sha.setdefault(sha, []).append(cid)
+                    if len(phash) >= 8:
+                        by_phash.append((cid, phash))
+
+                for ids in by_sha.values():
+                    if len(ids) > 1:
+                        first = ids[0]
+                        for other in ids[1:]:
+                            union(first, other)
+
+                for idx, (cid, phash) in enumerate(by_phash):
+                    for other_cid, other_phash in by_phash[idx + 1:]:
+                        if self._phash_distance(phash, other_phash) <= near_threshold:
+                            union(cid, other_cid)
+
+                components = {}
+                for row in rows:
+                    components.setdefault(find(row['clip_id']), []).append(row['clip_id'])
+
+                self.conn.execute("UPDATE clips SET duplicate_group=''")
+                group_count = 0
+                for clip_ids in components.values():
+                    if len(clip_ids) < 2:
+                        continue
+                    group_count += 1
+                    seed = '|'.join(sorted(clip_ids)).encode('utf-8')
+                    group_id = 'dup-' + hashlib.sha1(seed).hexdigest()[:12]
+                    self.conn.executemany(
+                        """
+                        UPDATE clips
+                        SET duplicate_group=?,
+                            duplicate_status=CASE
+                                WHEN duplicate_status IS NULL OR duplicate_status='' THEN 'review'
+                                ELSE duplicate_status
+                            END
+                        WHERE clip_id=?
+                        """,
+                        [(group_id, cid) for cid in clip_ids])
+                self.conn.commit()
+                return group_count
+        except Exception as e:
+            print(f"[DB WARN] recompute_duplicate_groups failed: {e}")
+            return 0
 
     def set_dl_status(self, clip_id, status):
         try:
@@ -1598,6 +1711,7 @@ class DB:
 
     def search_assets(self, query='', filters=None, mode='OR',
                       favorites_only=False, downloaded_only=False,
+                      duplicates_only=False,
                       duration_range=None, collection_id=None,
                       min_rating=0, sort_by='', limit=3000, offset=0):
         """
@@ -1643,6 +1757,10 @@ class DB:
         # Downloaded only
         if downloaded_only:
             base += " AND c.dl_status = 'done' AND c.local_path != ''"
+
+        # Duplicate review filter
+        if duplicates_only:
+            base += " AND c.duplicate_group IS NOT NULL AND c.duplicate_group != ''"
 
         # Rating filter
         if min_rating > 0:
@@ -1694,6 +1812,7 @@ class DB:
                 CAST(SUBSTR(c.duration,INSTR(c.duration,':')+1) AS REAL)
                 ELSE 0 END DESC""",
             'rating':      'c.user_rating DESC, c.found_at DESC',
+            'duplicates':  "c.duplicate_group DESC, c.duplicate_status ASC, c.found_at DESC",
         }
         if sort_by and sort_by in _SORT_MAP:
             base += f" ORDER BY {_SORT_MAP[sort_by]}"
@@ -6477,6 +6596,12 @@ class ImportWorker(QThread):
             if is_new:
                 # Set local_path and dl_status so it shows as downloaded
                 self.db.update_local_path(clip_id, fpath, 'done')
+                if hasattr(self.db, 'update_duplicate_fingerprints'):
+                    self.db.update_duplicate_fingerprints(
+                        clip_id,
+                        _sha256_file(fpath),
+                        _video_perceptual_hash(fpath, ffmpeg),
+                    )
                 imported += 1
                 self.clip_signal.emit(clip_data)
 
@@ -6650,6 +6775,55 @@ def _quarantine_file(path):
         suffix += 1
     os.replace(path, candidate)
     return candidate
+
+
+def _sha256_file(path, chunk_size=1024 * 1024):
+    """Return a SHA-256 digest for a local file, or an empty string on failure."""
+    if not path or not os.path.isfile(path):
+        return ''
+    digest = hashlib.sha256()
+    try:
+        with open(path, 'rb') as fh:
+            for chunk in iter(lambda: fh.read(chunk_size), b''):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except Exception:
+        return ''
+
+
+def _video_perceptual_hash(video_path, ffmpeg_path=None, timeout=20):
+    """Return a small average hash from the first readable video frame."""
+    if not video_path or not os.path.isfile(video_path):
+        return ''
+    ffmpeg = ffmpeg_path or _get_ffmpeg()
+    if not ffmpeg:
+        return ''
+    try:
+        result = subprocess.run(
+            [
+                ffmpeg, '-v', 'error',
+                '-ss', '00:00:01',
+                '-i', video_path,
+                '-frames:v', '1',
+                '-vf', 'scale=8:8,format=gray',
+                '-f', 'rawvideo',
+                '-',
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+            check=False,
+        )
+        pixels = result.stdout[:64]
+        if result.returncode != 0 or len(pixels) < 64:
+            return ''
+        avg = sum(pixels) / len(pixels)
+        bits = 0
+        for value in pixels:
+            bits = (bits << 1) | (1 if value >= avg else 0)
+        return f"{bits:016x}"
+    except Exception:
+        return ''
 
 
 def _validate_video_file(video_path, ffmpeg_path=None, min_bytes=1):
@@ -7205,8 +7379,14 @@ class DownloadWorker(QThread):
                 else:
                     speed_final = ""
 
+                file_hash = _sha256_file(out_path)
+                visual_hash = _video_perceptual_hash(out_path, ffmpeg)
+                clip_data['file_sha256'] = file_hash
+                clip_data['perceptual_hash'] = visual_hash
                 self._write_sidecar(clip_data, out_path)
                 self.db.update_local_path(clip_id, out_path, 'done')
+                if hasattr(self.db, 'update_duplicate_fingerprints'):
+                    self.db.update_duplicate_fingerprints(clip_id, file_hash, visual_hash)
                 self._extract_thumb(clip_id, out_path)
                 done_text = f"Done  |  {size_str}"
                 if speed_final: done_text += f"  |  avg {speed_final}"
@@ -7291,6 +7471,10 @@ class DownloadWorker(QThread):
             'attribution_text': _g('attribution_text'),
             'terms_url':    _g('terms_url'),
             'preview_status': _g('preview_status'),
+            'file_sha256':   _g('file_sha256'),
+            'perceptual_hash': _g('perceptual_hash'),
+            'duplicate_group': _g('duplicate_group'),
+            'duplicate_status': _g('duplicate_status'),
             'local_path':   mp4_path,
             'downloaded_at': datetime.now().isoformat(),
         }
@@ -7808,6 +7992,7 @@ class MainWindow(QMainWindow):
             'combo_user_collection': ("User collection filter", "Filters clips by local collection"),
             'chk_favorites': ("Favorites only", "Shows favorited clips only"),
             'chk_downloaded': ("Downloaded only", "Shows downloaded clips only"),
+            'chk_duplicates': ("Duplicates only", "Shows exact and near-duplicate groups only"),
             'btn_search_mode': ("Search mode", "Toggles OR and AND search term matching"),
             'spin_min_rating': ("Minimum rating", "Filters clips by minimum star rating"),
             'combo_saved_search': ("Saved searches", "Loads a saved library search"),
@@ -8161,7 +8346,8 @@ class MainWindow(QMainWindow):
         for label, key in [('Newest First','newest'),('Oldest First','oldest'),
                            ('Title A-Z','title_az'),('Title Z-A','title_za'),
                            ('Resolution','resolution'),('Shortest','duration_short'),
-                           ('Longest','duration_long'),('Rating','rating')]:
+                           ('Longest','duration_long'),('Rating','rating'),
+                           ('Duplicates','duplicates')]:
             self.combo_sort.addItem(label, key)
         self.combo_sort.currentIndexChanged.connect(self._do_search)
         srow.addWidget(self.combo_sort)
@@ -8240,6 +8426,13 @@ class MainWindow(QMainWindow):
         self.chk_downloaded.setStyleSheet(f"color:{C('success')}; font-size:{Z(11)}px; font-weight:500;")
         self.chk_downloaded.toggled.connect(self._do_search)
         frow2.addWidget(self.chk_downloaded)
+
+        # Duplicates toggle
+        self.chk_duplicates = QCheckBox("Dupes")
+        self.chk_duplicates.setStyleSheet(f"color:{C('warning')}; font-size:{Z(11)}px; font-weight:500;")
+        self.chk_duplicates.setToolTip("Show exact and near-duplicate groups only")
+        self.chk_duplicates.toggled.connect(self._do_search)
+        frow2.addWidget(self.chk_duplicates)
 
         # AND/OR toggle
         self.btn_search_mode = QPushButton("OR")
@@ -8648,6 +8841,7 @@ class MainWindow(QMainWindow):
             ('Attribution', _g('attribution_required'), C('text')),
             ('Terms',      _g('terms_url') or _g('license_url'), C('accent_hover')),
             ('Preview',    _g('preview_status'), C('border_light')),
+            ('Duplicate',  (f"{_g('duplicate_group')} / {_g('duplicate_status') or 'review'}" if _g('duplicate_group') else ''), C('warning')),
             ('Status',     ('\u2713 Downloaded' if has_local else ('\u2717 Error' if _g('dl_status')=='error' else '\u2014')),
                           C('success') if has_local else (C('error') if _g('dl_status')=='error' else C('border_light'))),
             ('Clip ID',    clip_id,          C('text_muted')),
@@ -8938,6 +9132,20 @@ class MainWindow(QMainWindow):
 
         menu.addSeparator()
 
+        dup_group = _g('duplicate_group')
+        if multi or dup_group:
+            dup_menu = menu.addMenu("Duplicate Review")
+            act_dup_refresh = dup_menu.addAction("Refresh Duplicate Groups")
+            act_dup_refresh.triggered.connect(self._ctx_refresh_duplicate_groups)
+            dup_menu.addSeparator()
+            act_keep = dup_menu.addAction("Mark Keep")
+            act_keep.triggered.connect(lambda: self._ctx_set_duplicate_status(clip_ids, 'keep'))
+            act_ignore = dup_menu.addAction("Mark Ignore")
+            act_ignore.triggered.connect(lambda: self._ctx_set_duplicate_status(clip_ids, 'ignore'))
+            act_review = dup_menu.addAction("Mark Review")
+            act_review.triggered.connect(lambda: self._ctx_set_duplicate_status(clip_ids, 'review'))
+            menu.addSeparator()
+
         # Download (single or bulk)
         has_m3u8 = [r for r in sel_rows if (r.get('m3u8_url') if isinstance(r, dict) else r['m3u8_url'])]
         if has_m3u8:
@@ -8969,6 +9177,17 @@ class MainWindow(QMainWindow):
             except Exception: pass
 
     # ── Asset Management: Detail Panel Actions ──────────────────────────────
+
+    def _ctx_refresh_duplicate_groups(self):
+        count = self.db.recompute_duplicate_groups()
+        self._toast(f"Duplicate groups refreshed: {count}", 'success', 2500)
+        self._do_search()
+
+    def _ctx_set_duplicate_status(self, clip_ids, status):
+        for cid in clip_ids:
+            self.db.set_duplicate_status(cid, status)
+        self._toast(f"Duplicate status set: {status}", 'success', 1800)
+        self._do_search()
 
     def _detail_clip_id(self):
         """Get the clip_id from the currently selected detail clip."""
@@ -9812,6 +10031,7 @@ class MainWindow(QMainWindow):
         mode = 'AND' if (hasattr(self, 'btn_search_mode') and self.btn_search_mode.isChecked()) else 'OR'
         favorites_only = hasattr(self, 'chk_favorites') and self.chk_favorites.isChecked()
         downloaded_only = hasattr(self, 'chk_downloaded') and self.chk_downloaded.isChecked()
+        duplicates_only = hasattr(self, 'chk_duplicates') and self.chk_duplicates.isChecked()
         duration_range = self.combo_duration.currentText() if hasattr(self, 'combo_duration') else 'All'
         min_rating = self.spin_min_rating.value() if hasattr(self, 'spin_min_rating') else 0
 
@@ -9836,6 +10056,7 @@ class MainWindow(QMainWindow):
             rows = self.db.search_assets(
                 query=query, filters=filters, mode=mode,
                 favorites_only=favorites_only, downloaded_only=downloaded_only,
+                duplicates_only=duplicates_only,
                 duration_range=duration_range, collection_id=collection_id,
                 min_rating=min_rating, sort_by=sort_by)
             # Convert sqlite3.Row to plain dicts for thread-safe GUI consumption
@@ -9873,6 +10094,8 @@ class MainWindow(QMainWindow):
             filters['_favorites'] = True
         if hasattr(self, 'chk_downloaded') and self.chk_downloaded.isChecked():
             filters['_downloaded'] = True
+        if hasattr(self, 'chk_duplicates') and self.chk_duplicates.isChecked():
+            filters['_duplicates'] = True
         if hasattr(self, 'combo_duration') and self.combo_duration.currentText() != 'All':
             filters['_duration'] = self.combo_duration.currentText()
         if hasattr(self, 'spin_min_rating') and self.spin_min_rating.value() > 0:
@@ -9899,6 +10122,8 @@ class MainWindow(QMainWindow):
                     self.chk_favorites.setChecked(filters.get('_favorites', False))
                 if hasattr(self, 'chk_downloaded'):
                     self.chk_downloaded.setChecked(filters.get('_downloaded', False))
+                if hasattr(self, 'chk_duplicates'):
+                    self.chk_duplicates.setChecked(filters.get('_duplicates', False))
                 if hasattr(self, 'combo_duration'):
                     dur = filters.get('_duration', 'All')
                     di = self.combo_duration.findText(dur)
@@ -10120,6 +10345,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'combo_user_collection'): self.combo_user_collection.setCurrentIndex(0)
         if hasattr(self, 'chk_favorites'): self.chk_favorites.setChecked(False)
         if hasattr(self, 'chk_downloaded'): self.chk_downloaded.setChecked(False)
+        if hasattr(self, 'chk_duplicates'): self.chk_duplicates.setChecked(False)
         if hasattr(self, 'spin_min_rating'): self.spin_min_rating.setValue(0)
         if hasattr(self, 'btn_search_mode'):
             self.btn_search_mode.setChecked(False)
@@ -10213,7 +10439,8 @@ class MainWindow(QMainWindow):
             fields = ['clip_id','title','creator','collection','tags','resolution',
                       'duration','frame_rate','camera','formats','m3u8_url','source_url',
                       'source_site','license_name','license_url','attribution_required',
-                      'attribution_text','terms_url','preview_status','found_at']
+                      'attribution_text','terms_url','preview_status','file_sha256',
+                      'perceptual_hash','duplicate_group','duplicate_status','found_at']
             with open(f,'w',newline='',encoding='utf-8') as fh:
                 wr = csv.DictWriter(fh, fieldnames=fields, extrasaction='ignore')
                 wr.writeheader()

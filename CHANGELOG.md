@@ -2,6 +2,12 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.7.19] - 2026-06-30
+
+- Added: Exact SHA-256 and optional ffmpeg visual-hash duplicate grouping for imported/downloaded clips.
+- Added: Library duplicate-only filter, duplicate sort, detail-panel duplicate status, and context-menu keep/ignore/review actions.
+- Changed: Sidecar JSON and CSV exports include duplicate fingerprint and review metadata.
+
 ## [v0.7.18] - 2026-06-30
 
 - Added: Expanded local workflow tests for legacy DB migration with FTS rebuild, export file outputs, download preflight failures, and local import metadata persistence.
