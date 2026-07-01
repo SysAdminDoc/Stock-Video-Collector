@@ -1841,8 +1841,12 @@ class DB:
         if filters is None: filters = {}
         if query and query.strip():
             raw = query.strip()
-            words = raw.split()
-            terms = ' OR '.join(f'"{w}"' if len(w) > 1 else w for w in words)
+            words = [w.replace('"', '') for w in raw.split() if w.replace('"', '')]
+            if not words:
+                words = ['']
+            terms = ' OR '.join(f'"{w}"' for w in words if w)
+            if not terms:
+                terms = '""'
             sql = """
                 SELECT c.* FROM clips c
                 JOIN clips_fts f ON c.id = f.rowid
@@ -2321,6 +2325,10 @@ class DB:
                     tags.add(t)
         return sorted(tags)
 
+    @staticmethod
+    def _like_escape(s):
+        return s.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+
     def rename_tag(self, old_tag, new_tag):
         old_tag, new_tag = old_tag.strip(), new_tag.strip()
         if not old_tag or not new_tag:
@@ -2329,8 +2337,8 @@ class DB:
         try:
             with self._lock:
                 rows = self.conn.execute(
-                    "SELECT clip_id, user_tags FROM clips WHERE user_tags LIKE ?",
-                    (f'%{old_tag}%',)).fetchall()
+                    "SELECT clip_id, user_tags FROM clips WHERE user_tags LIKE ? ESCAPE '\\'",
+                    (f'%{self._like_escape(old_tag)}%',)).fetchall()
                 for r in rows:
                     parts = [t.strip() for t in str(r['user_tags'] or '').split(',')]
                     if old_tag in parts:
@@ -2355,8 +2363,8 @@ class DB:
             return 0
         try:
             with self._lock:
-                like_parts = ' OR '.join(['user_tags LIKE ?' for _ in merge_set])
-                params = [f'%{t}%' for t in merge_set]
+                like_parts = ' OR '.join(["user_tags LIKE ? ESCAPE '\\'" for _ in merge_set])
+                params = [f'%{self._like_escape(t)}%' for t in merge_set]
                 rows = self.conn.execute(
                     f"SELECT clip_id, user_tags FROM clips WHERE {like_parts}", params).fetchall()
                 for r in rows:
@@ -2391,8 +2399,8 @@ class DB:
         try:
             with self._lock:
                 rows = self.conn.execute(
-                    "SELECT clip_id, user_tags FROM clips WHERE user_tags LIKE ?",
-                    (f'%{tag_to_split}%',)).fetchall()
+                    "SELECT clip_id, user_tags FROM clips WHERE user_tags LIKE ? ESCAPE '\\'",
+                    (f'%{self._like_escape(tag_to_split)}%',)).fetchall()
                 for r in rows:
                     parts = [t.strip() for t in str(r['user_tags'] or '').split(',')]
                     if tag_to_split in parts:
@@ -2430,11 +2438,12 @@ class DB:
             params.append(collection_id)
         elif query and query.strip():
             raw = query.strip()
-            words = raw.split()
-            if mode == 'AND':
-                terms = ' AND '.join(f'"{w}"' for w in words)
+            words = [w.replace('"', '') for w in raw.split() if w.replace('"', '')]
+            if words:
+                joiner = ' AND ' if mode == 'AND' else ' OR '
+                terms = joiner.join(f'"{w}"' for w in words)
             else:
-                terms = ' OR '.join(f'"{w}"' if len(w) > 1 else w for w in words)
+                terms = '""'
             base = """SELECT c.* FROM clips c
                       JOIN clips_fts f ON c.id = f.rowid
                       WHERE clips_fts MATCH ?"""
@@ -8664,7 +8673,7 @@ class DownloadWorker(QThread):
         self._site_lock     = threading.Lock()
         cfg = load_config() or {}
         self._transcode_preset = cfg.get('transcode_preset', 'none')
-        self._bw_schedule = cfg.get('bw_schedule', {})
+        self._bw_schedule = cfg.get('bw_schedule', 'none')
         # Pre-populate _seen with already-downloaded clips to prevent re-downloads
         try:
             rows = db.execute(
@@ -8699,16 +8708,20 @@ class DownloadWorker(QThread):
     def enqueue(self, clip, priority=None):
         """Thread-safe: add a clip dict/Row to the download queue. Returns True if actually queued."""
         cid = clip['clip_id'] if hasattr(clip, '__getitem__') else clip.get('clip_id', '')
-        if not cid or cid in self._seen:
+        if not cid:
             return False
         m3u8 = clip['m3u8_url'] if hasattr(clip, '__getitem__') else clip.get('m3u8_url', '')
         if not m3u8:
             return False
-        self._seen.add(cid)
-        if priority is None:
-            priority = self.PRIORITY_NORMAL
-        self._queue_seq += 1
-        self._queue.put((priority, self._queue_seq, dict(clip)))
+        with self._active_lock:
+            if cid in self._seen:
+                return False
+            self._seen.add(cid)
+            if priority is None:
+                priority = self.PRIORITY_NORMAL
+            self._queue_seq += 1
+            seq = self._queue_seq
+        self._queue.put((priority, seq, dict(clip)))
         self.log_signal.emit(
             f"[DL-Q] Enqueued id:{cid} pri:{priority} ({self._queue.qsize()} in queue)", "INFO")
         return True
@@ -8743,9 +8756,12 @@ class DownloadWorker(QThread):
         with ThreadPoolExecutor(max_workers=self.max_concurrent) as pool:
             futures = {}
             while not self._stop.is_set():
-                # Re-check deferred items
+                # Re-check deferred items (respect max_concurrent)
                 still_deferred = []
                 for item in deferred:
+                    if len(futures) >= self.max_concurrent:
+                        still_deferred.append(item)
+                        continue
                     _pri, _seq, clip = item
                     site = str(clip.get('source_site', '') or '')
                     if self._site_acquire(site):
@@ -8792,10 +8808,13 @@ class DownloadWorker(QThread):
             if self._stop.is_set():
                 for f in list(futures):
                     f.cancel()
-            # Wait for remaining futures
-            for f in futures:
+            # Wait for remaining futures and release per-site slots
+            for f in list(futures):
+                done_clip = futures.pop(f, None)
                 try: f.result(timeout=30)
                 except Exception: pass
+                if done_clip:
+                    self._site_release(str(done_clip.get('source_site', '') or ''))
 
         self.all_done.emit()
 
@@ -9500,16 +9519,11 @@ class ToastNotification(QLabel):
 
 
 class MainWindow(QMainWindow):
-    scheduled_crawl_signal = pyqtSignal()
-
     def __init__(self):
         super().__init__()
         self.db              = None
         self.worker          = None
         self._dl_worker      = None   # DownloadWorker instance
-        self._scheduler      = None
-        self._scheduled_job_id = 'nightly-incremental-crawl'
-        self.scheduled_crawl_signal.connect(self._run_scheduled_crawl)
         self._db_path        = os.path.join(get_config_dir(), 'artlist_results.db')
         self._latest_db_backup_path = self._find_latest_db_backup()
 
@@ -9520,7 +9534,6 @@ class MainWindow(QMainWindow):
         self._init_db()
         self._build_ui()
         self._load_saved_config()
-        self._configure_scheduled_crawl(load_config() or {})
         self._check_browser_status()
         self._emit_startup_storage_status()
 
@@ -9922,9 +9935,7 @@ class MainWindow(QMainWindow):
             'spin_crawl_budget_min_delay': ("Per-host minimum crawl gap", "Minimum delay between browser navigations to the same host"),
             'spin_max_pages': ("Maximum pages", "Stop after this many pages; zero means unlimited"),
             'spin_max_depth': ("Maximum crawl depth", "Link-following depth from the start URL"),
-            'chk_scheduled_crawl': ("Enable scheduled crawl", "Runs an incremental crawl at the configured nightly time while the app is open"),
-            'time_scheduled_crawl': ("Scheduled crawl time", "Local time for the nightly incremental crawl"),
-            'lbl_schedule_status': ("Scheduled crawl status", "Shows whether a scheduled crawl is active and when it will run next"),
+            'chk_scheduled_crawl': ("Enable scheduled crawl", "Automatically re-run crawl at the configured interval"),
             'chk_headless': ("Headless mode", "Run the browser without a visible window"),
             'chk_resume': ("Resume mode", "Skip pages already marked crawled"),
             'chk_crawl_trace': ("Save failed-crawl diagnostics", "Save redacted trace bundles when browser crawls fail"),
@@ -10039,7 +10050,7 @@ class MainWindow(QMainWindow):
         order = [
             'inp_url', 'combo_crawl_mode', 'btn_start', 'btn_pause', 'btn_stop',
             'chk_respect_crawl_budget', 'spin_crawl_budget_min_delay',
-            'chk_scheduled_crawl', 'time_scheduled_crawl',
+            'chk_scheduled_crawl',
             'chk_challenge_notify', 'inp_challenge_discord_webhook', 'inp_challenge_telegram_bot_token', 'inp_challenge_telegram_chat_id',
             'chk_rotate_browser_profiles', 'spin_browser_profile_slots', 'chk_proxy_pool', 'chk_residential_proxy_sticky', 'inp_proxy_pool_path',
             'inp_search', 'combo_sort', 'combo_duration', 'combo_user_collection',
@@ -10180,28 +10191,9 @@ class MainWindow(QMainWindow):
         g3.addLayout(spinrow("Max depth:", 'spin_max_depth', 1,   25,3,"","Depth from start URL."))
         lay.addWidget(grp3)
 
-        # Scheduled crawls
+        # Scheduled crawls (UI is on the Crawl tab; this is a note for config tab)
         grp_schedule = QGroupBox("Scheduled Crawls"); gs = QVBoxLayout(grp_schedule)
-        row_schedule = QHBoxLayout()
-        self.chk_scheduled_crawl = QCheckBox("Nightly incremental crawl")
-        self.chk_scheduled_crawl.setToolTip("Runs the current crawl configuration at the selected local time while the app is open; Resume mode is forced on.")
-        row_schedule.addWidget(self.chk_scheduled_crawl)
-        row_schedule.addSpacing(Z(18))
-        row_schedule.addWidget(QLabel("Start time:"))
-        self.time_scheduled_crawl = QTimeEdit()
-        self.time_scheduled_crawl.setDisplayFormat("HH:mm")
-        self.time_scheduled_crawl.setTime(QTime(2, 0))
-        self.time_scheduled_crawl.setFixedWidth(Z(95))
-        row_schedule.addWidget(self.time_scheduled_crawl)
-        row_schedule.addStretch()
-        gs.addLayout(row_schedule)
-        self.lbl_schedule_status = QLabel("Scheduled crawl disabled.")
-        self.lbl_schedule_status.setObjectName("subtext")
-        self.lbl_schedule_status.setWordWrap(True)
-        gs.addWidget(self.lbl_schedule_status)
-        gs.addWidget(self._sub("Scheduled runs reuse the current profile/mode/settings, force Resume mode on, and skip if another crawl is already running."))
-        self.chk_scheduled_crawl.toggled.connect(lambda _checked: self._configure_scheduled_crawl(self._collect_config()))
-        self.time_scheduled_crawl.timeChanged.connect(lambda _time: self._configure_scheduled_crawl(self._collect_config()))
+        gs.addWidget(self._sub("Scheduled crawl controls are on the Crawl tab. Configure the interval there, then enable the checkbox to auto-repeat crawls."))
         lay.addWidget(grp_schedule)
 
         # Options
@@ -12689,15 +12681,17 @@ class MainWindow(QMainWindow):
                 if hasattr(self, 'spin_min_rating'):
                     self.spin_min_rating.setValue(filters.get('_min_rating', 0))
                 self._do_search()
-                # Feed notification — check for new matches
                 search_id = s['id']
                 last_count = int(s.get('last_count', 0) or 0)
-                current_count = len(self._last_rows) if hasattr(self, '_last_rows') and self._last_rows else 0
-                self.db.update_saved_search_count(search_id, current_count)
-                if last_count > 0 and current_count > last_count:
-                    new_matches = current_count - last_count
-                    self._toast(f"{new_matches} new match(es) since last run", 'success', 4000)
+                QTimer.singleShot(500, lambda sid=search_id, lc=last_count: self._check_saved_search_feed(sid, lc))
         except Exception: pass
+
+    def _check_saved_search_feed(self, search_id, last_count):
+        current_count = len(self._last_rows) if hasattr(self, '_last_rows') and self._last_rows else 0
+        self.db.update_saved_search_count(search_id, current_count)
+        if last_count > 0 and current_count > last_count:
+            new_matches = current_count - last_count
+            self._toast(f"{new_matches} new match(es) since last run", 'success', 4000)
 
     def _refresh_saved_searches(self):
         if not hasattr(self, 'combo_saved_search'): return
@@ -14120,6 +14114,20 @@ class MainWindow(QMainWindow):
             self._clipboard_timer.stop()
         if hasattr(self, '_preview_timer'):
             self._preview_timer.stop()
+        if hasattr(self, '_crawl_schedule_timer'):
+            self._crawl_schedule_timer.stop()
+        if hasattr(self, '_file_watcher'):
+            self._file_watcher.removePaths(self._file_watcher.directories())
+        if hasattr(self, '_search_timer'):
+            self._search_timer.stop()
+        if hasattr(self, '_clip_found_timer'):
+            self._clip_found_timer.stop()
+        if hasattr(self, '_notes_save_timer'):
+            self._notes_save_timer.stop()
+        if hasattr(self, '_tags_save_timer'):
+            self._tags_save_timer.stop()
+        if hasattr(self, '_wal_timer'):
+            self._wal_timer.stop()
         if getattr(self, '_video_player', None):
             self._video_player.stop()
         if self.worker and self.worker.isRunning():
