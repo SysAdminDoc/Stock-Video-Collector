@@ -1427,6 +1427,19 @@ class DB:
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
         """)
+        # Add locked column to collections if upgrading
+        for col, defn in [('locked', 'INTEGER DEFAULT 0')]:
+            try:
+                self.conn.execute(f"ALTER TABLE collections ADD COLUMN {col} {defn}")
+            except sqlite3.OperationalError:
+                pass
+        # Add saved-search feed tracking columns
+        for col, defn in [('last_count', 'INTEGER DEFAULT 0'),
+                          ('last_run_at', 'TEXT DEFAULT ""')]:
+            try:
+                self.conn.execute(f"ALTER TABLE saved_searches ADD COLUMN {col} {defn}")
+            except sqlite3.OperationalError:
+                pass
         self.conn.commit()
         # ── FTS integrity check — auto-rebuild if corrupted ───────────
         self._check_fts_health()
@@ -2197,22 +2210,54 @@ class DB:
     def add_to_collection(self, clip_id, collection_id):
         try:
             with self._lock:
+                locked = self.conn.execute(
+                    "SELECT locked FROM collections WHERE id=?", (collection_id,)).fetchone()
+                if locked and locked['locked']:
+                    print(f"[DB] Collection {collection_id} is locked")
+                    return False
                 self.conn.execute(
                     "INSERT OR IGNORE INTO clip_collections(clip_id,collection_id) VALUES(?,?)",
                     (clip_id, collection_id))
                 self.conn.commit()
+                return True
         except Exception as e:
             print(f"[DB WARN] add_to_collection failed: {e}")
+            return False
 
     def remove_from_collection(self, clip_id, collection_id):
         try:
             with self._lock:
+                locked = self.conn.execute(
+                    "SELECT locked FROM collections WHERE id=?", (collection_id,)).fetchone()
+                if locked and locked['locked']:
+                    print(f"[DB] Collection {collection_id} is locked")
+                    return False
                 self.conn.execute(
                     "DELETE FROM clip_collections WHERE clip_id=? AND collection_id=?",
                     (clip_id, collection_id))
                 self.conn.commit()
+                return True
         except Exception as e:
             print(f"[DB WARN] remove_from_collection failed: {e}")
+            return False
+
+    def toggle_collection_lock(self, collection_id):
+        try:
+            with self._lock:
+                row = self.conn.execute("SELECT locked FROM collections WHERE id=?", (collection_id,)).fetchone()
+                new_state = 0 if (row and row['locked']) else 1
+                self.conn.execute("UPDATE collections SET locked=? WHERE id=?", (new_state, collection_id))
+                self.conn.commit()
+                return new_state
+        except Exception:
+            return 0
+
+    def is_collection_locked(self, collection_id):
+        try:
+            row = self.execute("SELECT locked FROM collections WHERE id=?", (collection_id,)).fetchone()
+            return bool(row and row['locked'])
+        except Exception:
+            return False
 
     def get_clip_collections(self, clip_id):
         """Get all collections a clip belongs to."""
@@ -2249,6 +2294,121 @@ class DB:
                 self.conn.commit()
         except Exception as e:
             print(f"[DB WARN] delete_saved_search failed: {e}")
+
+    def update_saved_search_count(self, search_id, count):
+        try:
+            with self._lock:
+                self.conn.execute(
+                    "UPDATE saved_searches SET last_count=?, last_run_at=datetime('now') WHERE id=?",
+                    (count, search_id))
+                self.conn.commit()
+        except Exception:
+            pass
+
+    def get_saved_search_by_id(self, search_id):
+        try:
+            return self.execute("SELECT * FROM saved_searches WHERE id=?", (search_id,)).fetchone()
+        except Exception:
+            return None
+
+    # ── Tag bulk operations ────────────────────────────────────────────────
+
+    def all_user_tags(self):
+        rows = self.execute("SELECT user_tags FROM clips WHERE user_tags != ''").fetchall()
+        tags = set()
+        for r in rows:
+            for t in str(r['user_tags'] or '').split(','):
+                t = t.strip()
+                if t:
+                    tags.add(t)
+        return sorted(tags)
+
+    def rename_tag(self, old_tag, new_tag):
+        old_tag, new_tag = old_tag.strip(), new_tag.strip()
+        if not old_tag or not new_tag:
+            return 0
+        count = 0
+        try:
+            with self._lock:
+                rows = self.conn.execute(
+                    "SELECT clip_id, user_tags FROM clips WHERE user_tags LIKE ?",
+                    (f'%{old_tag}%',)).fetchall()
+                for r in rows:
+                    parts = [t.strip() for t in str(r['user_tags'] or '').split(',')]
+                    if old_tag in parts:
+                        parts = [new_tag if t == old_tag else t for t in parts]
+                        parts = list(dict.fromkeys(parts))
+                        self.conn.execute(
+                            "UPDATE clips SET user_tags=? WHERE clip_id=?",
+                            (', '.join(parts), r['clip_id']))
+                        count += 1
+                self.conn.commit()
+        except Exception as e:
+            print(f"[DB WARN] rename_tag failed: {e}")
+        return count
+
+    def merge_tags(self, tags_to_merge, target_tag):
+        target_tag = target_tag.strip()
+        if not target_tag:
+            return 0
+        count = 0
+        merge_set = {t.strip() for t in tags_to_merge if t.strip()}
+        if not merge_set:
+            return 0
+        try:
+            with self._lock:
+                like_parts = ' OR '.join(['user_tags LIKE ?' for _ in merge_set])
+                params = [f'%{t}%' for t in merge_set]
+                rows = self.conn.execute(
+                    f"SELECT clip_id, user_tags FROM clips WHERE {like_parts}", params).fetchall()
+                for r in rows:
+                    parts = [t.strip() for t in str(r['user_tags'] or '').split(',')]
+                    changed = False
+                    new_parts = []
+                    for t in parts:
+                        if t in merge_set:
+                            if target_tag not in new_parts:
+                                new_parts.append(target_tag)
+                            changed = True
+                        else:
+                            new_parts.append(t)
+                    if changed:
+                        self.conn.execute(
+                            "UPDATE clips SET user_tags=? WHERE clip_id=?",
+                            (', '.join(new_parts), r['clip_id']))
+                        count += 1
+                self.conn.commit()
+        except Exception as e:
+            print(f"[DB WARN] merge_tags failed: {e}")
+        return count
+
+    def split_tag(self, tag_to_split, new_tags):
+        tag_to_split = tag_to_split.strip()
+        if not tag_to_split:
+            return 0
+        new_tag_list = [t.strip() for t in new_tags if t.strip()]
+        if not new_tag_list:
+            return 0
+        count = 0
+        try:
+            with self._lock:
+                rows = self.conn.execute(
+                    "SELECT clip_id, user_tags FROM clips WHERE user_tags LIKE ?",
+                    (f'%{tag_to_split}%',)).fetchall()
+                for r in rows:
+                    parts = [t.strip() for t in str(r['user_tags'] or '').split(',')]
+                    if tag_to_split in parts:
+                        idx = parts.index(tag_to_split)
+                        parts = parts[:idx] + new_tag_list + parts[idx+1:]
+                        parts = list(dict.fromkeys(parts))
+                        self.conn.execute(
+                            "UPDATE clips SET user_tags=? WHERE clip_id=?",
+                            (', '.join(parts), r['clip_id']))
+                        count += 1
+                self.conn.commit()
+        except Exception as e:
+            print(f"[DB WARN] split_tag failed: {e}")
+        return count
 
     # ── Enhanced Search ────────────────────────────────────────────────────
 
@@ -10361,6 +10521,11 @@ class MainWindow(QMainWindow):
         self.btn_retry_thumb_errors.setToolTip("Reset failed thumbnail jobs and retry them")
         self.btn_retry_thumb_errors.clicked.connect(self._retry_failed_thumbnails)
         brow.addWidget(self.btn_retry_thumb_errors)
+        btn_tag_editor = QPushButton("Tag Editor")
+        btn_tag_editor.setObjectName("neutral"); btn_tag_editor.setFixedHeight(Z(30))
+        btn_tag_editor.setToolTip("Bulk rename, merge, or split user tags")
+        btn_tag_editor.clicked.connect(self._open_tag_editor)
+        brow.addWidget(btn_tag_editor)
         lay.addLayout(brow)
         return w
 
@@ -10946,13 +11111,28 @@ class MainWindow(QMainWindow):
         coll_menu = menu.addMenu("Add to Collection")
         try:
             for c in self.db.get_collections():
-                act_c = coll_menu.addAction(c['name'])
-                cid_copy = c['id']
-                act_c.triggered.connect(lambda _, ci=cid_copy: self._ctx_add_to_collection(clip_ids, ci))
+                locked = bool(c['locked']) if 'locked' in c.keys() else False
+                prefix = "\U0001F512 " if locked else ""
+                act_c = coll_menu.addAction(f"{prefix}{c['name']}")
+                if locked:
+                    act_c.setEnabled(False)
+                else:
+                    cid_copy = c['id']
+                    act_c.triggered.connect(lambda _, ci=cid_copy: self._ctx_add_to_collection(clip_ids, ci))
         except Exception: pass
         coll_menu.addSeparator()
         act_new_coll = coll_menu.addAction("+ New Collection...")
         act_new_coll.triggered.connect(lambda: self._ctx_new_collection(clip_ids))
+        # Collection lock/unlock submenu
+        lock_menu = menu.addMenu("Lock/Unlock Collection")
+        try:
+            for c in self.db.get_collections():
+                locked = bool(c['locked']) if 'locked' in c.keys() else False
+                label = f"\U0001F513 Unlock {c['name']}" if locked else f"\U0001F512 Lock {c['name']}"
+                act_lock = lock_menu.addAction(label)
+                cid_copy = c['id']
+                act_lock.triggered.connect(lambda _, ci=cid_copy: self._ctx_toggle_lock(ci))
+        except Exception: pass
 
         menu.addSeparator()
 
@@ -12107,6 +12287,14 @@ class MainWindow(QMainWindow):
                 if hasattr(self, 'spin_min_rating'):
                     self.spin_min_rating.setValue(filters.get('_min_rating', 0))
                 self._do_search()
+                # Feed notification — check for new matches
+                search_id = s['id']
+                last_count = int(s.get('last_count', 0) or 0)
+                current_count = len(self._last_rows) if hasattr(self, '_last_rows') and self._last_rows else 0
+                self.db.update_saved_search_count(search_id, current_count)
+                if last_count > 0 and current_count > last_count:
+                    new_matches = current_count - last_count
+                    self._toast(f"{new_matches} new match(es) since last run", 'success', 4000)
         except Exception: pass
 
     def _refresh_saved_searches(self):
@@ -12323,6 +12511,100 @@ class MainWindow(QMainWindow):
         else:
             self._toast("No new videos found to import", 'info', 3000)
 
+    def _open_tag_editor(self):
+        from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QListWidget, QAbstractItemView
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Tag Editor")
+        dlg.setMinimumSize(Z(500), Z(400))
+        lay = QVBoxLayout(dlg)
+
+        tags = self.db.all_user_tags()
+        if not tags:
+            lay.addWidget(QLabel("No user tags found. Tag clips first."))
+            bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+            bb.rejected.connect(dlg.reject)
+            lay.addWidget(bb)
+            dlg.exec()
+            return
+
+        tag_list = QListWidget()
+        tag_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        for t in tags:
+            tag_list.addItem(t)
+        lay.addWidget(QLabel(f"Tags ({len(tags)}):"))
+        lay.addWidget(tag_list)
+
+        btn_row = QHBoxLayout()
+        btn_rename = QPushButton("Rename")
+        btn_merge = QPushButton("Merge Selected")
+        btn_split = QPushButton("Split")
+        for b in (btn_rename, btn_merge, btn_split):
+            b.setFixedHeight(Z(32))
+            btn_row.addWidget(b)
+        lay.addLayout(btn_row)
+
+        result_lbl = QLabel("")
+        result_lbl.setStyleSheet(f"color:{C('success')};")
+        lay.addWidget(result_lbl)
+
+        def _rename():
+            from PyQt6.QtWidgets import QInputDialog
+            sel = tag_list.selectedItems()
+            if len(sel) != 1:
+                result_lbl.setText("Select exactly one tag to rename.")
+                return
+            old = sel[0].text()
+            new, ok = QInputDialog.getText(dlg, "Rename Tag", f"Rename '{old}' to:", text=old)
+            if ok and new.strip() and new.strip() != old:
+                n = self.db.rename_tag(old, new.strip())
+                result_lbl.setText(f"Renamed '{old}' -> '{new.strip()}' in {n} clip(s)")
+                tag_list.clear()
+                for t in self.db.all_user_tags():
+                    tag_list.addItem(t)
+
+        def _merge():
+            from PyQt6.QtWidgets import QInputDialog
+            sel = [item.text() for item in tag_list.selectedItems()]
+            if len(sel) < 2:
+                result_lbl.setText("Select 2+ tags to merge.")
+                return
+            target, ok = QInputDialog.getText(
+                dlg, "Merge Tags", f"Merge {len(sel)} tags into:", text=sel[0])
+            if ok and target.strip():
+                n = self.db.merge_tags(sel, target.strip())
+                result_lbl.setText(f"Merged {len(sel)} tags -> '{target.strip()}' in {n} clip(s)")
+                tag_list.clear()
+                for t in self.db.all_user_tags():
+                    tag_list.addItem(t)
+
+        def _split():
+            from PyQt6.QtWidgets import QInputDialog
+            sel = tag_list.selectedItems()
+            if len(sel) != 1:
+                result_lbl.setText("Select exactly one tag to split.")
+                return
+            old = sel[0].text()
+            parts, ok = QInputDialog.getText(
+                dlg, "Split Tag", f"Split '{old}' into (comma-separated):")
+            if ok and parts.strip():
+                new_tags = [t.strip() for t in parts.split(',') if t.strip()]
+                if new_tags:
+                    n = self.db.split_tag(old, new_tags)
+                    result_lbl.setText(f"Split '{old}' -> {new_tags} in {n} clip(s)")
+                    tag_list.clear()
+                    for t in self.db.all_user_tags():
+                        tag_list.addItem(t)
+
+        btn_rename.clicked.connect(_rename)
+        btn_merge.clicked.connect(_merge)
+        btn_split.clicked.connect(_split)
+
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        dlg.exec()
+        self._do_search()
+
     def _refresh_filter_dropdowns(self):
         for attr, col in self._filter_map.items():
             cb = getattr(self, attr); cur = cb.currentText()
@@ -12526,6 +12808,12 @@ class MainWindow(QMainWindow):
                     self.db.add_to_collection(cid, coll_id)
                 self._refresh_collections_combo()
                 self._toast(f"Created '{name.strip()}' with {len(clip_ids)} clip(s)", 'success', 2000)
+
+    def _ctx_toggle_lock(self, collection_id):
+        new_state = self.db.toggle_collection_lock(collection_id)
+        label = "locked" if new_state else "unlocked"
+        self._toast(f"Collection {label}", 'success', 1500)
+        self._refresh_collections_combo()
 
     def _dl_context_menu(self, pos):
         """Right-click context menu for the download queue table."""
