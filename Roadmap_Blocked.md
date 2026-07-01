@@ -15,5 +15,8 @@ Items that require external infrastructure, heavy ML dependencies, or external c
 ## Infrastructure
 - Multi-machine library sync via SQLite replication or Litestream — needs server infrastructure or Litestream setup
 
+## Dependency Decision Required
+- Replace homebrew XOR stream cipher with standard AEAD (Fernet/AES-GCM) — requires adding `cryptography` package as a direct dependency. Current HMAC-SHA256 CTR + encrypt-then-MAC is functionally correct but not a named standard.
+
 ## Large Scope
 - Built-in lightweight editor: trim + concatenate + export without leaving the app — massive scope, needs dedicated video editing UI with timeline, preview, and export pipeline

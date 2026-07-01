@@ -2,6 +2,16 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.8.2] - 2026-07-01
+
+### Fixed
+- Bandwidth throttle now applied to ffmpeg downloads — monitors file growth and inserts pauses to enforce the configured KB/s limit during throttle hours.
+- Blocked bandwidth schedule (nights_only) no longer occupies download threads for 10 minutes — returns `deferred` status and re-queues at low priority.
+- Secret vault key file and vault JSON now get NTFS ACL protection on Windows via `icacls` (removes inherited permissions, grants only current user).
+- User plugin system gated behind `enable_user_plugins` config flag (default off) — no more unconditional code execution from `user_profiles/` directory.
+- yt-dlp ingest worker now drains stderr via `communicate()` instead of `wait()` + `read()`, preventing pipe buffer deadlock.
+- Watch folder import waits for file size to stabilize before probing with ffprobe, preventing metadata extraction on partially-written files.
+
 ## [v0.8.1] - 2026-07-01
 
 ### Fixed
