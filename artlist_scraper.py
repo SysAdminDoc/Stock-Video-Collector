@@ -8639,6 +8639,9 @@ class DownloadWorker(QThread):
         self._per_site_limit = per_site_limit
         self._site_active   = {}               # source_site -> active count
         self._site_lock     = threading.Lock()
+        cfg = load_config() or {}
+        self._transcode_preset = cfg.get('transcode_preset', 'none')
+        self._bw_schedule = cfg.get('bw_schedule', {})
         # Pre-populate _seen with already-downloaded clips to prevent re-downloads
         try:
             rows = db.execute(
@@ -8884,6 +8887,66 @@ class DownloadWorker(QThread):
             self.log(f"[DL] yt-dlp error [{clip_id}]: {e}", "ERROR")
             return 'transient'
 
+    BW_SCHEDULES = {
+        'throttle_day':  {'throttle_hours': (8, 18), 'throttle_kbps': 500},
+        'throttle_biz':  {'throttle_hours': (9, 17), 'throttle_kbps': 200},
+        'nights_only':   {'block_hours': (6, 22)},
+    }
+
+    def _check_bw_schedule(self):
+        sched = self._bw_schedule
+        if not sched or sched == 'none':
+            return True, 0
+        params = self.BW_SCHEDULES.get(sched)
+        if not params:
+            return True, 0
+        hour = datetime.now().hour
+        if 'block_hours' in params:
+            start, end = params['block_hours']
+            if start <= hour < end:
+                return False, 0
+        if 'throttle_hours' in params:
+            start, end = params['throttle_hours']
+            if start <= hour < end:
+                return True, params.get('throttle_kbps', 500)
+        return True, 0
+
+    TRANSCODE_PRESETS = {
+        'h264_1080p': ['-c:v', 'libx264', '-preset', 'medium', '-crf', '23',
+                       '-vf', 'scale=-2:1080', '-c:a', 'aac', '-b:a', '128k',
+                       '-movflags', '+faststart'],
+        'hevc_4k':    ['-c:v', 'libx265', '-preset', 'slow', '-crf', '22',
+                       '-vf', 'scale=-2:2160', '-c:a', 'aac', '-b:a', '192k',
+                       '-movflags', '+faststart', '-tag:v', 'hvc1'],
+        'prores':     ['-c:v', 'prores_ks', '-profile:v', '3', '-vendor', 'apl0',
+                       '-pix_fmt', 'yuv422p10le', '-c:a', 'pcm_s16le'],
+    }
+
+    def _run_transcode(self, input_path, ffmpeg, preset, clip_id):
+        if preset not in self.TRANSCODE_PRESETS:
+            return None
+        ext = '.mov' if preset == 'prores' else '.mp4'
+        base = os.path.splitext(input_path)[0]
+        suffix = {'h264_1080p': '_proxy', 'hevc_4k': '_4k', 'prores': '_prores'}[preset]
+        tc_path = f"{base}{suffix}{ext}"
+        if os.path.isfile(tc_path):
+            return tc_path
+        self.log(f"[DL] Transcoding [{clip_id}] with preset '{preset}'", "INFO")
+        self.progress_signal.emit(clip_id, 99, f"Transcoding ({preset})...")
+        cmd = [ffmpeg, '-y', '-i', input_path] + self.TRANSCODE_PRESETS[preset] + [tc_path]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            if proc.returncode == 0 and os.path.isfile(tc_path) and os.path.getsize(tc_path) > 0:
+                self.log(f"[DL] Transcode done [{clip_id}]: {os.path.basename(tc_path)}", "OK")
+                return tc_path
+            else:
+                self.log(f"[DL] Transcode failed [{clip_id}]: exit {proc.returncode}", "WARN")
+        except subprocess.TimeoutExpired:
+            self.log(f"[DL] Transcode timeout [{clip_id}]", "WARN")
+        except Exception as e:
+            self.log(f"[DL] Transcode error [{clip_id}]: {e}", "ERROR")
+        return None
+
     @staticmethod
     def _head_check_url(url, timeout=8):
         """Quick HTTP HEAD/GET check. Returns (ok, reason).
@@ -8918,6 +8981,20 @@ class DownloadWorker(QThread):
         import time as _time
         clip_id      = str(clip.get('clip_id', '') or '')
         m3u8_url     = str(clip.get('m3u8_url','') or '')
+
+        # ── Bandwidth schedule check ──────────────────────────────────
+        allowed, _throttle = self._check_bw_schedule()
+        if not allowed:
+            self.progress_signal.emit(clip_id, 0, "Waiting (bandwidth schedule)...")
+            for _ in range(60):
+                if self._stop.is_set():
+                    return 'transient'
+                _time.sleep(10)
+                allowed, _throttle = self._check_bw_schedule()
+                if allowed:
+                    break
+            if not allowed:
+                return 'transient'
 
         # ── Check if already downloaded ───────────────────────────────
         if clip_id:
@@ -9184,6 +9261,13 @@ class DownloadWorker(QThread):
                 else:
                     speed_final = ""
 
+                # Post-download transcode if preset is configured
+                transcode_preset = self._transcode_preset
+                if transcode_preset and transcode_preset != 'none':
+                    tc_path = self._run_transcode(out_path, ffmpeg, transcode_preset, clip_id)
+                    if tc_path:
+                        out_path = tc_path
+
                 file_hash = _sha256_file(out_path)
                 visual_hash = _video_perceptual_hash(out_path, ffmpeg)
                 clip_data['file_sha256'] = file_hash
@@ -9195,6 +9279,8 @@ class DownloadWorker(QThread):
                 self._extract_thumb(clip_id, out_path)
                 done_text = f"Done  |  {size_str}"
                 if speed_final: done_text += f"  |  avg {speed_final}"
+                if transcode_preset and transcode_preset != 'none':
+                    done_text += f"  |  {transcode_preset}"
                 self.progress_signal.emit(clip_id, 100, done_text)
                 self.log(f"Done: {filename}  ({size_str}, {speed_final})", "OK")
                 self.clip_done.emit(clip_id, True, out_path)
@@ -9870,6 +9956,8 @@ class MainWindow(QMainWindow):
             'spin_max_retries': ("Maximum download retries", "Retry count for failed downloads"),
             'spin_bw_limit': ("Download speed limit", "Maximum download speed in KB per second"),
             'spin_per_site_cap': ("Per-site download cap", "Maximum concurrent downloads per source site"),
+            'combo_transcode': ("Transcode preset", "Post-download transcode format preset"),
+            'combo_bw_schedule': ("Bandwidth schedule", "Time-based download speed schedule"),
             'dl_overall_bar': ("Overall download progress", "Progress across queued downloads"),
             'dl_item_bar': ("Current download progress", "Progress for the active download"),
             'lbl_dl_current': ("Current download status", "Current item download status"),
@@ -11680,6 +11768,32 @@ class MainWindow(QMainWindow):
         perf_row.addStretch()
 
         dglay.addLayout(perf_row)
+
+        # ── Transcode preset + bandwidth schedule ─────────────────────────
+        tc_row = QHBoxLayout(); tc_row.setSpacing(Z(12))
+        tc_row.addWidget(QLabel("Post-Download Transcode:"))
+        self.combo_transcode = QComboBox(); self.combo_transcode.setFixedWidth(Z(180))
+        for label, val in [("None (copy only)", "none"),
+                           ("H.264 1080p Proxy", "h264_1080p"),
+                           ("HEVC 4K Archive", "hevc_4k"),
+                           ("ProRes Master", "prores")]:
+            self.combo_transcode.addItem(label, val)
+        self.combo_transcode.setToolTip("Automatically transcode downloads to a preset format")
+        tc_row.addWidget(self.combo_transcode)
+
+        tc_row.addSpacing(Z(16))
+        tc_row.addWidget(QLabel("BW Schedule:"))
+        self.combo_bw_schedule = QComboBox(); self.combo_bw_schedule.setFixedWidth(Z(200))
+        for label, val in [("Always full speed", "none"),
+                           ("Throttle daytime (8am-6pm)", "throttle_day"),
+                           ("Throttle business hours (9-5)", "throttle_biz"),
+                           ("Nights only (10pm-6am)", "nights_only")]:
+            self.combo_bw_schedule.addItem(label, val)
+        self.combo_bw_schedule.setToolTip("Automatically adjust download speed based on time of day")
+        tc_row.addWidget(self.combo_bw_schedule)
+        tc_row.addStretch()
+        dglay.addLayout(tc_row)
+
         lay.addWidget(dirgrp)
 
         # ── Queue stats banner ─────────────────────────────────────────────
@@ -11866,6 +11980,10 @@ class MainWindow(QMainWindow):
             cfg['bw_limit'] = self.spin_bw_limit.value()
         if hasattr(self, 'spin_per_site_cap'):
             cfg['per_site_cap'] = self.spin_per_site_cap.value()
+        if hasattr(self, 'combo_transcode'):
+            cfg['transcode_preset'] = self.combo_transcode.currentData() or 'none'
+        if hasattr(self, 'combo_bw_schedule'):
+            cfg['bw_schedule'] = self.combo_bw_schedule.currentData() or 'none'
         # Clipboard monitor state
         if hasattr(self, '_clipboard_timer'):
             cfg['clipboard_monitor'] = self._clipboard_timer.isActive()
@@ -13341,6 +13459,12 @@ class MainWindow(QMainWindow):
             self.spin_bw_limit.setValue(cfg['bw_limit'])
         if 'per_site_cap' in cfg and hasattr(self, 'spin_per_site_cap'):
             self.spin_per_site_cap.setValue(_bounded_int(cfg.get('per_site_cap'), 0, 0, 16))
+        if 'transcode_preset' in cfg and hasattr(self, 'combo_transcode'):
+            idx = self.combo_transcode.findData(cfg['transcode_preset'])
+            if idx >= 0: self.combo_transcode.setCurrentIndex(idx)
+        if 'bw_schedule' in cfg and hasattr(self, 'combo_bw_schedule'):
+            idx = self.combo_bw_schedule.findData(cfg['bw_schedule'])
+            if idx >= 0: self.combo_bw_schedule.setCurrentIndex(idx)
         if 'backup_retention_count' in cfg and hasattr(self, 'spin_backup_retention'):
             self.spin_backup_retention.setValue(max(1, min(500, int(cfg['backup_retention_count']))))
         if hasattr(self, 'chk_respect_crawl_budget'):
