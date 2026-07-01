@@ -297,7 +297,7 @@ if __name__ == '__main__':
 # ─────────────────────────────────────────────────────────────────────────────
 
 import json, sqlite3, asyncio, threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urlparse, urlunparse, parse_qs, urlencode, unquote, urljoin, quote
 
 from connectors import (
@@ -3255,6 +3255,31 @@ class SiteProfile:
 # Built-in profiles live in profiles/*.py so site breakage stays isolated.
 from profiles import register_builtin_profiles
 register_builtin_profiles(SiteProfile)
+
+
+def _load_user_plugins():
+    """Discover and load user site plugins from user_profiles/ directory."""
+    import importlib.util
+    plugin_dir = Path(__file__).resolve().parent / 'user_profiles'
+    if not plugin_dir.is_dir():
+        return
+    for py_file in sorted(plugin_dir.glob('*.py')):
+        if py_file.name.startswith('_'):
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location(
+                f'user_profiles.{py_file.stem}', py_file)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            if hasattr(mod, 'build') and callable(mod.build):
+                profile = mod.build(SiteProfile)
+                SiteProfile.register(profile)
+                print(f"[Plugin] Loaded user profile: {profile.name}")
+        except Exception as e:
+            print(f"[Plugin] Failed to load {py_file.name}: {e}")
+
+
+_load_user_plugins()
 
 
 # Convenience reference — kept for backward compat with existing code paths
@@ -9099,7 +9124,32 @@ class DownloadWorker(QThread):
             except Exception:
                 pass
         elif os.path.isfile(part_path):
-            self.log(f"[DL] Found previous partial id:{clip_id}: {os.path.basename(part_path)}", "INFO")
+            part_size = os.path.getsize(part_path)
+            self.log(f"[DL] Found previous partial id:{clip_id}: {os.path.basename(part_path)} ({part_size/1_000_000:.1f} MB)", "INFO")
+            valid, reason = _validate_video_file(part_path, ffmpeg)
+            if valid:
+                self.log(f"[DL] Partial is complete and valid [{clip_id}], promoting", "OK")
+                os.replace(part_path, out_path)
+                file_hash = _sha256_file(out_path)
+                visual_hash = _video_perceptual_hash(out_path, ffmpeg)
+                clip_data['file_sha256'] = file_hash
+                clip_data['perceptual_hash'] = visual_hash
+                self._write_sidecar(clip_data, out_path)
+                self.db.update_local_path(clip_id, out_path, 'done')
+                if hasattr(self.db, 'update_duplicate_fingerprints'):
+                    self.db.update_duplicate_fingerprints(clip_id, file_hash, visual_hash)
+                self._extract_thumb(clip_id, out_path)
+                fsize = os.path.getsize(out_path)
+                size_str = f"{fsize/1_000_000:.1f} MB" if fsize > 1_000_000 else f"{fsize/1000:.0f} KB"
+                self.progress_signal.emit(clip_id, 100, f"Resumed  |  {size_str}")
+                self.clip_done.emit(clip_id, True, out_path)
+                return 'ok'
+            else:
+                self.log(f"[DL] Partial incomplete [{clip_id}]: {reason}. Re-downloading.", "WARN")
+                try:
+                    os.remove(part_path)
+                except Exception:
+                    pass
 
         # Disk space check — require at least 500 MB free before starting a download
         try:
@@ -10362,6 +10412,27 @@ class MainWindow(QMainWindow):
         for b in (self.btn_start, self.btn_pause, self.btn_stop): btns.addWidget(b)
         btns.addStretch(); btns.addWidget(self.chk_verbose_log); btns.addWidget(rebuild_fts); btns.addWidget(self.btn_backup_catalog); btns.addWidget(self.btn_restore_db); btns.addWidget(clrdb); btns.addWidget(clrlog)
         lay.addLayout(btns)
+
+        # Scheduled crawls
+        sched_row = QHBoxLayout(); sched_row.setSpacing(Z(8))
+        self.chk_scheduled_crawl = QCheckBox("Scheduled crawl")
+        self.chk_scheduled_crawl.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(11)}px;")
+        self.chk_scheduled_crawl.setToolTip("Automatically re-run crawl at the configured interval")
+        sched_row.addWidget(self.chk_scheduled_crawl)
+        sched_row.addWidget(QLabel("Every:"))
+        self.spin_crawl_interval = QSpinBox(); self.spin_crawl_interval.setRange(1, 168)
+        self.spin_crawl_interval.setValue(24); self.spin_crawl_interval.setSuffix(" hours")
+        self.spin_crawl_interval.setFixedWidth(Z(100))
+        sched_row.addWidget(self.spin_crawl_interval)
+        self.lbl_next_crawl = QLabel("")
+        self.lbl_next_crawl.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(11)}px;")
+        sched_row.addWidget(self.lbl_next_crawl)
+        sched_row.addStretch()
+        lay.addLayout(sched_row)
+
+        self._crawl_schedule_timer = QTimer(self)
+        self._crawl_schedule_timer.timeout.connect(self._on_scheduled_crawl_tick)
+        self.chk_scheduled_crawl.toggled.connect(self._toggle_scheduled_crawl)
 
         log_lbl = QLabel("Live Log"); log_lbl.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(11)}px; font-weight:600;")
         lay.addWidget(log_lbl)
@@ -12172,6 +12243,9 @@ class MainWindow(QMainWindow):
             cfg['transcode_preset'] = self.combo_transcode.currentData() or 'none'
         if hasattr(self, 'combo_bw_schedule'):
             cfg['bw_schedule'] = self.combo_bw_schedule.currentData() or 'none'
+        if hasattr(self, 'chk_scheduled_crawl'):
+            cfg['scheduled_crawl'] = self.chk_scheduled_crawl.isChecked()
+            cfg['crawl_interval_hours'] = self.spin_crawl_interval.value()
         # Clipboard monitor state
         if hasattr(self, '_clipboard_timer'):
             cfg['clipboard_monitor'] = self._clipboard_timer.isActive()
@@ -12269,6 +12343,26 @@ class MainWindow(QMainWindow):
             self.lbl_browser_status.setText(
                 "Install failed — check the log above. Try running: python -m playwright install chromium")
             self.lbl_browser_status.setStyleSheet(f"color:{C('error')}; font-weight:500;")
+
+    def _toggle_scheduled_crawl(self, checked):
+        if checked:
+            interval_ms = self.spin_crawl_interval.value() * 3600 * 1000
+            self._crawl_schedule_timer.start(interval_ms)
+            next_at = datetime.now() + timedelta(hours=self.spin_crawl_interval.value())
+            self.lbl_next_crawl.setText(f"Next: {next_at.strftime('%Y-%m-%d %H:%M')}")
+            self._on_log(f"Scheduled crawl every {self.spin_crawl_interval.value()}h", "INFO")
+        else:
+            self._crawl_schedule_timer.stop()
+            self.lbl_next_crawl.setText("")
+
+    def _on_scheduled_crawl_tick(self):
+        if self.worker and self.worker.isRunning():
+            self._on_log("Scheduled crawl skipped (crawl already running)", "INFO")
+            return
+        self._on_log("Starting scheduled crawl", "INFO")
+        self._start_crawl()
+        next_at = datetime.now() + timedelta(hours=self.spin_crawl_interval.value())
+        self.lbl_next_crawl.setText(f"Next: {next_at.strftime('%Y-%m-%d %H:%M')}")
 
     def _start_crawl(self):
         if self.worker and self.worker.isRunning(): return
@@ -13655,6 +13749,10 @@ class MainWindow(QMainWindow):
             if idx >= 0: self.combo_bw_schedule.setCurrentIndex(idx)
         if 'watch_folder' in cfg and hasattr(self, 'inp_watch_folder'):
             self.inp_watch_folder.setText(cfg['watch_folder'])
+        if 'crawl_interval_hours' in cfg and hasattr(self, 'spin_crawl_interval'):
+            self.spin_crawl_interval.setValue(_bounded_int(cfg.get('crawl_interval_hours'), 24, 1, 168))
+        if _cfg_bool(cfg, 'scheduled_crawl', False) and hasattr(self, 'chk_scheduled_crawl'):
+            self.chk_scheduled_crawl.setChecked(True)
         if 'backup_retention_count' in cfg and hasattr(self, 'spin_backup_retention'):
             self.spin_backup_retention.setValue(max(1, min(500, int(cfg['backup_retention_count']))))
         if hasattr(self, 'chk_respect_crawl_budget'):
