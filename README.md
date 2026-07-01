@@ -1,6 +1,6 @@
 # Stock Video Collector
 
-![Version](https://img.shields.io/badge/version-0.7.22-blue)
+![Version](https://img.shields.io/badge/version-0.7.23-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white)
 ![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?logo=qt&logoColor=white)
 ![Playwright](https://img.shields.io/badge/Playwright-Headless_Browser-2EAD33?logo=playwright&logoColor=white)
@@ -122,7 +122,7 @@ The crawler uses four complementary strategies to find video URLs on every page:
 | Saved searches | Save and recall frequent search + filter combos |
 | FTS index rebuild | One-click repair if search results drift out of sync |
 | Backup catalog | Clearing the database creates verified SQLite backups with SHA-256 catalog, selected restore, and retention pruning |
-| License provenance | Source license, attribution requirement, terms URL, and preview/watermark status are stored with clips when known |
+| License provenance | Source license, embedded rights tags, attribution requirement, terms URL, and preview/watermark status are stored with clips when known |
 
 ### Asset Management
 
@@ -147,7 +147,7 @@ The crawler uses four complementary strategies to find video URLs on every page:
 | Speed & ETA tracking | Real-time download speed and estimated completion time |
 | Bandwidth limiting | Optional download speed cap |
 | Filename templates | Customizable output filenames: `{title}`, `{clip_id}`, `{creator}`, `{collection}`, `{resolution}` |
-| Sidecar metadata | JSON metadata file, including license/provenance fields, written alongside each downloaded MP4 |
+| Sidecar metadata | JSON metadata file with `stock-video-collector.provenance.v1` sidecar-only provenance, written alongside each downloaded MP4 |
 | Thumbnail extraction | Auto-extracts thumbnails and records retryable HTTP/ffmpeg failure diagnostics |
 
 ### Export Formats
@@ -155,9 +155,9 @@ The crawler uses four complementary strategies to find video URLs on every page:
 | Format | Contents |
 |--------|----------|
 | `.txt` | Plain list of M3U8/MP4 URLs |
-| `.json` | Full metadata for all clips (title, creator, tags, URLs, timestamps, license/provenance fields) |
+| `.json` | Full metadata for all clips (title, creator, tags, URLs, timestamps, license/provenance fields, embedded rights report) |
 | `.m3u` | Media player playlist — uses local path if downloaded, M3U8 URL otherwise |
-| `.csv` | Spreadsheet-ready with clip, source, license/provenance, and duplicate-review metadata columns |
+| `.csv` | Spreadsheet-ready with clip, source, license/provenance, embedded rights, and duplicate-review metadata columns |
 | **Batch** | Export all four formats at once |
 
 ### GUI

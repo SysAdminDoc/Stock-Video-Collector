@@ -2,6 +2,11 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.7.23] - 2026-06-30
+
+- Added: Embedded provenance extraction from ffprobe format/stream tags for local imports, including title, creator, rights, license URL, terms URL, attribution text, source, and raw tag JSON.
+- Changed: Download sidecars and JSON/CSV exports now include a sidecar-only provenance schema and media-write policy so embedded rights metadata round-trips without modifying media files in place.
+
 ## [v0.7.22] - 2026-06-30
 
 - Added: Thumbnail failure diagnostics with persisted reason/source/timestamp/retry count and a Library failed-thumbnail filter.

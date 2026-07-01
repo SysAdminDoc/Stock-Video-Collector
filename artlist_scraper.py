@@ -81,7 +81,7 @@ import secrets as _secrets
 
 APP_NAME = "Stock Video Collector"
 APP_PACKAGE_NAME = "Stock-Video-Collector"
-APP_VERSION = "0.7.22"
+APP_VERSION = "0.7.23"
 APP_WINDOW_TITLE = f"{APP_NAME}  v{APP_VERSION}"
 APP_CONFIG_DIR_NAME = "StockVideoCollector"
 LEGACY_APP_CONFIG_DIR_NAME = "ArtlistScraper"
@@ -96,6 +96,19 @@ PROVENANCE_FIELDS = (
     'terms_url',
     'preview_status',
 )
+
+EMBEDDED_PROVENANCE_FIELDS = (
+    'embedded_title',
+    'embedded_creator',
+    'embedded_rights',
+    'embedded_license_url',
+    'embedded_terms_url',
+    'embedded_attribution_text',
+    'embedded_metadata_source',
+    'embedded_metadata_json',
+)
+
+ALL_PROVENANCE_FIELDS = PROVENANCE_FIELDS + EMBEDDED_PROVENANCE_FIELDS
 
 
 def _branding_icon_path() -> Path:
@@ -984,7 +997,15 @@ class DB:
                           ('thumb_error', 'TEXT DEFAULT ""'),
                           ('thumb_error_at', 'TEXT DEFAULT ""'),
                           ('thumb_retry_count', 'INTEGER DEFAULT 0'),
-                          ('thumb_source', 'TEXT DEFAULT ""')]:
+                          ('thumb_source', 'TEXT DEFAULT ""'),
+                          ('embedded_title', 'TEXT DEFAULT ""'),
+                          ('embedded_creator', 'TEXT DEFAULT ""'),
+                          ('embedded_rights', 'TEXT DEFAULT ""'),
+                          ('embedded_license_url', 'TEXT DEFAULT ""'),
+                          ('embedded_terms_url', 'TEXT DEFAULT ""'),
+                          ('embedded_attribution_text', 'TEXT DEFAULT ""'),
+                          ('embedded_metadata_source', 'TEXT DEFAULT ""'),
+                          ('embedded_metadata_json', 'TEXT DEFAULT ""')]:
             try:
                 self.conn.execute(f"ALTER TABLE clips ADD COLUMN {col} {defn}")
             except sqlite3.OperationalError:
@@ -1237,8 +1258,10 @@ class DB:
                     INSERT OR IGNORE INTO clips
                     (clip_id,source_url,title,creator,collection,resolution,
                      duration,frame_rate,camera,formats,tags,m3u8_url,thumbnail_url,source_site,
-                     license_name,license_url,attribution_required,attribution_text,terms_url,preview_status)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     license_name,license_url,attribution_required,attribution_text,terms_url,preview_status,
+                     embedded_title,embedded_creator,embedded_rights,embedded_license_url,
+                     embedded_terms_url,embedded_attribution_text,embedded_metadata_source,embedded_metadata_json)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (
                     str(data.get('clip_id','') or ''),
                     str(data.get('source_url','') or ''),
@@ -1260,6 +1283,14 @@ class DB:
                     str(data.get('attribution_text','') or ''),
                     str(data.get('terms_url','') or ''),
                     str(data.get('preview_status','') or ''),
+                    str(data.get('embedded_title','') or ''),
+                    str(data.get('embedded_creator','') or ''),
+                    str(data.get('embedded_rights','') or ''),
+                    str(data.get('embedded_license_url','') or ''),
+                    str(data.get('embedded_terms_url','') or ''),
+                    str(data.get('embedded_attribution_text','') or ''),
+                    str(data.get('embedded_metadata_source','') or ''),
+                    str(data.get('embedded_metadata_json','') or ''),
                 ))
                 is_new = cur.rowcount > 0
                 self.conn.commit()
@@ -1359,12 +1390,18 @@ class DB:
             'title','creator','collection','resolution','duration',
             'frame_rate','camera','formats','tags','thumbnail_url','m3u8_url',
             'license_name','license_url','attribution_required',
-            'attribution_text','terms_url','preview_status'
+            'attribution_text','terms_url','preview_status',
+            'embedded_title','embedded_creator','embedded_rights',
+            'embedded_license_url','embedded_terms_url','embedded_attribution_text',
+            'embedded_metadata_source','embedded_metadata_json'
         })
         fields = ['title','creator','collection','resolution','duration',
                   'frame_rate','camera','formats','tags','thumbnail_url','m3u8_url',
                   'license_name','license_url','attribution_required',
-                  'attribution_text','terms_url','preview_status']
+                  'attribution_text','terms_url','preview_status',
+                  'embedded_title','embedded_creator','embedded_rights',
+                  'embedded_license_url','embedded_terms_url','embedded_attribution_text',
+                  'embedded_metadata_source','embedded_metadata_json']
         # Fields that can be upgraded (not just fill-empty)
         upgrade_fields = {'resolution', 'formats', 'frame_rate'}
         sets, vals = [], []
@@ -1533,7 +1570,10 @@ class DB:
             'attribution_text','terms_url','preview_status',
             'file_sha256','perceptual_hash','duplicate_group','duplicate_status',
             'thumb_status','thumb_error','thumb_error_at','thumb_retry_count','thumb_source',
-        })
+            'embedded_title','embedded_creator','embedded_rights',
+            'embedded_license_url','embedded_terms_url','embedded_attribution_text',
+            'embedded_metadata_source','embedded_metadata_json',
+            })
 
     def distinct_values(self, col):
         if col not in self._VALID_COLUMNS: return []
@@ -2642,6 +2682,174 @@ def _apply_source_provenance_defaults(data):
         if value and not str(enriched.get(field, '') or '').strip():
             enriched[field] = value
     return enriched
+
+
+def _norm_tag_key(key):
+    return re.sub(r'[^a-z0-9]+', '', str(key or '').lower())
+
+
+_EMBEDDED_TAG_ALIASES = {
+    'embedded_title': (
+        'title', 'dctitle', 'dc:title', 'xmp:title', 'quicktime:title',
+        'com.apple.quicktime.title', 'name', 'nam',
+    ),
+    'embedded_creator': (
+        'artist', 'author', 'creator', 'dc:creator', 'xmp:creator',
+        'byline', 'com.apple.quicktime.artist', 'art',
+    ),
+    'embedded_rights': (
+        'copyright', 'rights', 'dc:rights', 'xmp:rights', 'license',
+        'licence', 'usage_terms', 'xmprights:usageterms', 'xmp:rightsusageterms',
+        'description', 'comment',
+    ),
+    'embedded_license_url': (
+        'license_url', 'licenseurl', 'licence_url', 'licenceurl',
+        'webstatement', 'xmprights:webstatement', 'xmp:rightswebstatement',
+        'iptc4xmpext:licensorurl', 'licensorurl',
+    ),
+    'embedded_terms_url': (
+        'terms_url', 'termsurl', 'terms', 'terms_of_use', 'termsofuse',
+        'usage_terms_url', 'usagetermsurl',
+    ),
+    'embedded_attribution_text': (
+        'credit', 'attribution', 'byline', 'artist', 'author', 'creator',
+        'dc:creator',
+    ),
+}
+
+def _clean_embedded_value(value, limit=500):
+    text = _redact_text(str(value or '')).strip()
+    text = re.sub(r'\s+', ' ', text)
+    return text[:limit]
+
+
+def _collect_ffprobe_tags(info):
+    tags = {}
+
+    def add_tags(prefix, source):
+        for key, value in (source or {}).items():
+            clean = _clean_embedded_value(value, 1000)
+            if clean:
+                tags[f"{prefix}.{key}"] = clean
+
+    fmt = (info or {}).get('format') or {}
+    add_tags('format', fmt.get('tags') or {})
+    for idx, stream in enumerate((info or {}).get('streams') or []):
+        if isinstance(stream, dict):
+            add_tags(f"stream{idx}", stream.get('tags') or {})
+    return tags
+
+
+def _first_embedded_tag(raw_tags, field):
+    aliases = _EMBEDDED_TAG_ALIASES.get(field, ())
+    normalized_tags = []
+    for key, value in raw_tags.items():
+        parts = str(key).split('.', 1)
+        local_key = parts[-1] if parts else key
+        normalized_tags.append((_norm_tag_key(local_key), value))
+    for alias in aliases:
+        wanted = _norm_tag_key(alias)
+        for normalized_key, value in normalized_tags:
+            if normalized_key == wanted:
+                return _clean_embedded_value(value)
+    return ''
+
+
+def _embedded_provenance_from_ffprobe(info):
+    raw_tags = _collect_ffprobe_tags(info)
+    if not raw_tags:
+        return {}
+    data = {}
+    for field in _EMBEDDED_TAG_ALIASES:
+        value = _first_embedded_tag(raw_tags, field)
+        if value:
+            data[field] = value
+    if not data:
+        return {}
+    data['embedded_metadata_source'] = 'ffprobe:format/stream tags'
+    data['embedded_metadata_json'] = json.dumps(raw_tags, ensure_ascii=False, sort_keys=True)[:12000]
+    return data
+
+
+def _row_to_dict(row):
+    if isinstance(row, dict):
+        return dict(row)
+    if hasattr(row, 'keys'):
+        return dict(zip(row.keys(), tuple(row)))
+    return dict(row or {})
+
+
+def _parse_embedded_metadata_json(value):
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(str(value))
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _build_provenance_report(clip, media_path=''):
+    data = _row_to_dict(clip)
+    embedded = {
+        field: str(data.get(field, '') or '')
+        for field in EMBEDDED_PROVENANCE_FIELDS
+        if field != 'embedded_metadata_json' and str(data.get(field, '') or '')
+    }
+    report = {
+        'schema': 'stock-video-collector.provenance.v1',
+        'standards_orientation': ['IPTC Video Metadata Hub', 'XMP tags via ffprobe', 'C2PA-compatible sidecar'],
+        'media_write_policy': 'sidecar-only; source media is never modified in place',
+        'source_site': str(data.get('source_site', '') or ''),
+        'source_url': str(data.get('source_url', '') or ''),
+        'media_path': str(media_path or data.get('local_path', '') or ''),
+        'license': {
+            'name': str(data.get('license_name', '') or ''),
+            'url': str(data.get('license_url', '') or ''),
+            'terms_url': str(data.get('terms_url', '') or ''),
+            'attribution_required': str(data.get('attribution_required', '') or ''),
+            'attribution_text': str(data.get('attribution_text', '') or ''),
+            'preview_status': str(data.get('preview_status', '') or ''),
+        },
+        'embedded': embedded,
+    }
+    raw = _parse_embedded_metadata_json(data.get('embedded_metadata_json', ''))
+    if raw:
+        report['embedded_raw_tags'] = raw
+    return report
+
+
+def _clip_export_dict(row):
+    data = _row_to_dict(row)
+    data['provenance'] = _build_provenance_report(data, data.get('local_path', ''))
+    return data
+
+
+def _normalize_sidecar_payload(data):
+    payload = dict(data or {})
+    provenance = payload.get('provenance') if isinstance(payload.get('provenance'), dict) else {}
+    embedded = provenance.get('embedded') if isinstance(provenance.get('embedded'), dict) else {}
+    for field in EMBEDDED_PROVENANCE_FIELDS:
+        if field == 'embedded_metadata_json':
+            continue
+        if not payload.get(field) and embedded.get(field):
+            payload[field] = embedded.get(field)
+    if not payload.get('embedded_metadata_json') and provenance.get('embedded_raw_tags'):
+        payload['embedded_metadata_json'] = json.dumps(
+            provenance.get('embedded_raw_tags'), ensure_ascii=False, sort_keys=True)[:12000]
+    license_block = provenance.get('license') if isinstance(provenance.get('license'), dict) else {}
+    license_map = {
+        'license_name': 'name',
+        'license_url': 'url',
+        'terms_url': 'terms_url',
+        'attribution_required': 'attribution_required',
+        'attribution_text': 'attribution_text',
+        'preview_status': 'preview_status',
+    }
+    for dest, src in license_map.items():
+        if not payload.get(dest) and license_block.get(src):
+            payload[dest] = license_block.get(src)
+    return payload
 
 
 M3U8_RE = VIDEO_PATTERNS['m3u8']
@@ -6713,13 +6921,13 @@ class ImportWorker(QThread):
             meta = self._probe(ffprobe, fpath)
 
             # Clean title from filename
-            title = name_no_ext.replace('_', ' ').replace('-', ' ').strip()
+            title = meta.get('embedded_title') or name_no_ext.replace('_', ' ').replace('-', ' ').strip()
 
             clip_data = {
                 'clip_id':      clip_id,
                 'source_url':   '',
                 'title':        title,
-                'creator':      '',
+                'creator':      meta.get('embedded_creator', ''),
                 'collection':   os.path.basename(os.path.dirname(fpath)),
                 'resolution':   meta.get('resolution', ''),
                 'duration':     meta.get('duration', ''),
@@ -6730,7 +6938,14 @@ class ImportWorker(QThread):
                 'm3u8_url':     '',
                 'thumbnail_url':'',
                 'source_site':  'Local Import',
+                'license_name': meta.get('embedded_rights', ''),
+                'license_url':  meta.get('embedded_license_url', ''),
+                'terms_url':    meta.get('embedded_terms_url', ''),
+                'attribution_text': meta.get('embedded_attribution_text', ''),
             }
+            for field in EMBEDDED_PROVENANCE_FIELDS:
+                if meta.get(field):
+                    clip_data[field] = meta[field]
 
             is_new = self.db.save_clip(clip_data)
             if is_new:
@@ -6814,6 +7029,7 @@ class ImportWorker(QThread):
                     meta['duration'] = f"{mins}:{sec_r:02d}"
                 except ValueError:
                     pass
+            meta.update(_embedded_provenance_from_ffprobe(info))
         except Exception:
             pass
         return meta
@@ -7615,9 +7831,18 @@ class DownloadWorker(QThread):
             'perceptual_hash': _g('perceptual_hash'),
             'duplicate_group': _g('duplicate_group'),
             'duplicate_status': _g('duplicate_status'),
+            'embedded_title': _g('embedded_title'),
+            'embedded_creator': _g('embedded_creator'),
+            'embedded_rights': _g('embedded_rights'),
+            'embedded_license_url': _g('embedded_license_url'),
+            'embedded_terms_url': _g('embedded_terms_url'),
+            'embedded_attribution_text': _g('embedded_attribution_text'),
+            'embedded_metadata_source': _g('embedded_metadata_source'),
+            'embedded_metadata_json': _g('embedded_metadata_json'),
             'local_path':   mp4_path,
             'downloaded_at': datetime.now().isoformat(),
         }
+        data['provenance'] = _build_provenance_report(data, mp4_path)
         try:
             with open(sidecar, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
@@ -9008,6 +9233,8 @@ class MainWindow(QMainWindow):
             ('License',    _g('license_name'), C('warning')),
             ('Attribution', _g('attribution_required'), C('text')),
             ('Terms',      _g('terms_url') or _g('license_url'), C('accent_hover')),
+            ('Rights', _g('embedded_rights'), C('warning')),
+            ('Tag Source', _g('embedded_metadata_source'), C('text_muted')),
             ('Preview',    _g('preview_status'), C('border_light')),
             ('Duplicate',  (f"{_g('duplicate_group')} / {_g('duplicate_status') or 'review'}" if _g('duplicate_group') else ''), C('warning')),
             ('Thumbnail',  (f"{_g('thumb_status')} / {_g('thumb_error')}" if _g('thumb_status') == 'error' else _g('thumb_status')), C('error') if _g('thumb_status') == 'error' else C('success')),
@@ -9743,6 +9970,7 @@ class MainWindow(QMainWindow):
             try:
                 with open(os.path.join(folder, fname), encoding='utf-8') as f:
                     data = json.load(f)
+                data = _normalize_sidecar_payload(data)
                 if not data.get('clip_id'): continue
                 lp = data.get('local_path','')
                 if lp and not os.path.isfile(lp):
@@ -10661,9 +10889,14 @@ class MainWindow(QMainWindow):
             if not rows_snapshot: return "No data."
             fname = f"video-metadata-filtered-{self._ts()}.json" if filtered else f"video-metadata-{self._ts()}.json"
             f = os.path.join(self._out_dir(), fname)
-            with open(f,'w') as fh:
-                json.dump({'exported':datetime.now().isoformat(),'total':len(rows_snapshot),
-                           'clips':[dict(r) if isinstance(r, dict) else dict(zip(r.keys(), tuple(r))) for r in rows_snapshot]}, fh, indent=2)
+            with open(f,'w',encoding='utf-8') as fh:
+                json.dump({
+                    'exported': datetime.now().isoformat(),
+                    'total': len(rows_snapshot),
+                    'provenance_schema': 'stock-video-collector.provenance.v1',
+                    'media_write_policy': 'sidecar-only; source media is never modified in place',
+                    'clips': [_clip_export_dict(r) for r in rows_snapshot],
+                }, fh, indent=2, ensure_ascii=False)
             return f"Saved {len(rows_snapshot)} clips  ->  {f}"
         w = BackgroundWorker(_run)
         w.result_signal.connect(lambda msg: self.lbl_export_status.setText(msg))
@@ -10711,7 +10944,10 @@ class MainWindow(QMainWindow):
                       'duration','frame_rate','camera','formats','m3u8_url','source_url',
                       'source_site','license_name','license_url','attribution_required',
                       'attribution_text','terms_url','preview_status','file_sha256',
-                      'perceptual_hash','duplicate_group','duplicate_status','found_at']
+                      'perceptual_hash','duplicate_group','duplicate_status',
+                      'embedded_title','embedded_creator','embedded_rights',
+                      'embedded_license_url','embedded_terms_url','embedded_attribution_text',
+                      'embedded_metadata_source','found_at']
             with open(f,'w',newline='',encoding='utf-8') as fh:
                 wr = csv.DictWriter(fh, fieldnames=fields, extrasaction='ignore')
                 wr.writeheader()
