@@ -2,6 +2,11 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.7.32] - 2026-07-01
+
+- Added: Per-host crawl-budget guardrails that fetch robots.txt, enforce crawl-delay/request-rate policies, and cool down on Retry-After or X-RateLimit headers.
+- Added: Configure-tab controls and tests for robots/rate-limit handling without network calls.
+
 ## [v0.7.31] - 2026-07-01
 
 - Added: Human-in-the-loop challenge notifications with optional Discord webhook and Telegram bot/chat pings when a CAPTCHA or bot challenge appears.

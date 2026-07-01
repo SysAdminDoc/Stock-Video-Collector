@@ -1,6 +1,6 @@
 # Stock Video Collector
 
-![Version](https://img.shields.io/badge/version-0.7.31-blue)
+![Version](https://img.shields.io/badge/version-0.7.32-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white)
 ![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?logo=qt&logoColor=white)
 ![Playwright](https://img.shields.io/badge/Playwright-Headless_Browser-2EAD33?logo=playwright&logoColor=white)
@@ -96,6 +96,7 @@ The **Generic** profile works on any site — it intercepts all video network re
 | Profile slot rotation | Optional `browser_profiles/slot-N` rotation for Playwright persistent contexts |
 | Proxy pool | Optional `proxies.txt` support for Playwright browser launches; supports `host:port`, HTTP(S), SOCKS4, and SOCKS5 entries |
 | Residential sticky proxy session | Optional sticky mode keeps crawl, API discovery, and bootstrap browser launches on one selected proxy for the worker session |
+| Crawl-budget guardrails | Optional robots.txt crawl-delay/request-rate enforcement plus Retry-After and X-RateLimit cooldowns |
 | Request interception | Blocks heavy HLS `.ts` segments during crawl to save bandwidth |
 | Configurable delays | Page delay, scroll delay, M3U8 wait, timeout — all adjustable per-run |
 | Secret-safe config | API keys, auth headers, cookies, and proxy credentials are stored through the OS keyring when available, with encrypted local fallback |
@@ -228,6 +229,8 @@ All settings persist automatically in a JSON config file. Key options:
 | M3U8 wait | 5s | Time to wait for video URLs to appear |
 | Scroll steps | 10 | Number of scroll-down actions per page |
 | Timeout | 30s | Page load timeout |
+| Respect robots/rate limits | On | Fetch robots.txt per host, enforce crawl-delay/request-rate, and cool down from Retry-After/X-RateLimit headers |
+| Min host gap | 0 ms | Optional minimum delay between browser navigations to the same host |
 | Max pages | 0 (unlimited) | Stop after N pages |
 | Max depth | 3 | Link-following depth |
 | Headless | On | Run browser without visible window |

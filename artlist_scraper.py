@@ -76,13 +76,13 @@ multiprocessing.freeze_support()
 
 from pathlib import Path
 import xml.etree.ElementTree as ET
-import sys, os, subprocess, traceback, re, random, shutil, base64, hashlib, hmac, ipaddress, socket
+import sys, os, subprocess, traceback, re, random, shutil, base64, hashlib, hmac, ipaddress, socket, time
 import html as _html
 import secrets as _secrets
 
 APP_NAME = "Stock Video Collector"
 APP_PACKAGE_NAME = "Stock-Video-Collector"
-APP_VERSION = "0.7.31"
+APP_VERSION = "0.7.32"
 APP_WINDOW_TITLE = f"{APP_NAME}  v{APP_VERSION}"
 APP_CONFIG_DIR_NAME = "StockVideoCollector"
 LEGACY_APP_CONFIG_DIR_NAME = "ArtlistScraper"
@@ -633,6 +633,188 @@ def _send_challenge_notifications(cfg, profile_name, page_url, headless=True):
             results.append(('Telegram', False, str(exc)[:160]))
 
     return results
+
+
+def _parse_retry_after_seconds(value, now_wall=None):
+    raw = str(value or '').strip()
+    if not raw:
+        return 0.0
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+
+        dt = parsedate_to_datetime(raw)
+        if dt.tzinfo is None:
+            from datetime import timezone
+
+            dt = dt.replace(tzinfo=timezone.utc)
+        now = time.time() if now_wall is None else float(now_wall)
+        return max(0.0, dt.timestamp() - now)
+    except Exception:
+        return 0.0
+
+
+def _parse_rate_limit_reset_seconds(value, now_wall=None):
+    raw = str(value or '').strip()
+    if not raw:
+        return 0.0
+    try:
+        parsed = float(raw)
+    except ValueError:
+        return _parse_retry_after_seconds(raw, now_wall=now_wall)
+    if parsed > 10_000_000:
+        now = time.time() if now_wall is None else float(now_wall)
+        return max(0.0, parsed - now)
+    return max(0.0, parsed)
+
+
+class CrawlBudgetController:
+    USER_AGENT = APP_PACKAGE_NAME
+
+    def __init__(self, cfg=None):
+        cfg = cfg or {}
+        self.enabled = _cfg_bool(cfg, 'respect_crawl_budget', True)
+        self.min_delay = max(0.0, float(_bounded_int(cfg.get('crawl_budget_min_delay_ms'), 0, 0, 120000)) / 1000.0)
+        self.robots_timeout = max(1, _bounded_int(cfg.get('robots_timeout_seconds'), 8, 1, 30))
+        self.robots_cache = {}
+        self.host_state = {}
+
+    def _host_key(self, url):
+        parsed = urlparse(str(url or ''))
+        if not parsed.scheme or not parsed.netloc:
+            return ''
+        return f'{parsed.scheme.lower()}://{parsed.netloc.lower()}'
+
+    def _state_for_host(self, host_key):
+        return self.host_state.setdefault(host_key, {
+            'tokens': 1.0,
+            'updated_at': time.monotonic(),
+            'cooldown_until': 0.0,
+            'cooldown_reason': '',
+        })
+
+    def _robots_for_url(self, url):
+        host_key = self._host_key(url)
+        if not host_key:
+            return {'parser': None, 'delay': self.min_delay, 'robots_url': '', 'error': 'invalid URL'}
+        if host_key in self.robots_cache:
+            return self.robots_cache[host_key]
+
+        import urllib.robotparser
+
+        robots_url = urljoin(host_key + '/', 'robots.txt')
+        policy = {'parser': None, 'delay': self.min_delay, 'robots_url': robots_url, 'error': ''}
+        try:
+            with _safe_urlopen(robots_url, timeout=self.robots_timeout) as resp:
+                payload = resp.read(512_000)
+            text = payload.decode('utf-8', errors='replace')
+            parser = urllib.robotparser.RobotFileParser()
+            parser.set_url(robots_url)
+            parser.parse(text.splitlines())
+            crawl_delay = parser.crawl_delay(self.USER_AGENT)
+            if crawl_delay is None:
+                crawl_delay = parser.crawl_delay('*')
+            request_rate = parser.request_rate(self.USER_AGENT) or parser.request_rate('*')
+            rate_delay = 0.0
+            if request_rate and getattr(request_rate, 'requests', 0):
+                rate_delay = float(request_rate.seconds) / max(1, int(request_rate.requests))
+            policy.update({
+                'parser': parser,
+                'delay': max(self.min_delay, float(crawl_delay or 0), rate_delay),
+                'error': '',
+            })
+        except Exception as exc:
+            policy['error'] = str(exc)[:160]
+
+        self.robots_cache[host_key] = policy
+        return policy
+
+    def _refill_tokens(self, state, delay):
+        if delay <= 0:
+            state['tokens'] = 1.0
+            state['updated_at'] = time.monotonic()
+            return
+        now = time.monotonic()
+        elapsed = max(0.0, now - state.get('updated_at', now))
+        state['tokens'] = min(1.0, float(state.get('tokens', 1.0)) + (elapsed / delay))
+        state['updated_at'] = now
+
+    async def before_request(self, url, stop_event=None, log=None):
+        if not self.enabled:
+            return True, ''
+        host_key = self._host_key(url)
+        if not host_key:
+            return True, ''
+
+        policy = self._robots_for_url(url)
+        parser = policy.get('parser')
+        if parser and not parser.can_fetch(self.USER_AGENT, url):
+            return False, f"robots.txt disallows {_url_for_log(url)}"
+
+        delay = max(self.min_delay, float(policy.get('delay') or 0.0))
+        state = self._state_for_host(host_key)
+        self._refill_tokens(state, delay)
+
+        waits = []
+        now = time.monotonic()
+        cooldown_wait = max(0.0, float(state.get('cooldown_until', 0.0)) - now)
+        if cooldown_wait > 0:
+            waits.append((cooldown_wait, state.get('cooldown_reason') or 'server rate limit'))
+        if delay > 0 and state.get('tokens', 1.0) < 1.0:
+            waits.append(((1.0 - float(state.get('tokens', 0.0))) * delay, f'per-host crawl budget {delay:.1f}s'))
+
+        if waits:
+            wait_seconds, reason = max(waits, key=lambda item: item[0])
+            if log:
+                log(f"Crawl budget [{host_key}]: waiting {wait_seconds:.1f}s ({reason})", "INFO")
+            while wait_seconds > 0:
+                if stop_event is not None and stop_event.is_set():
+                    return False, 'stopped while waiting for crawl budget'
+                sleep_for = min(1.0, wait_seconds)
+                await asyncio.sleep(sleep_for)
+                wait_seconds -= sleep_for
+            self._refill_tokens(state, delay)
+
+        if delay > 0:
+            state['tokens'] = max(0.0, float(state.get('tokens', 1.0)) - 1.0)
+            state['updated_at'] = time.monotonic()
+        return True, ''
+
+    def observe_response(self, url, status=0, headers=None):
+        if not self.enabled:
+            return ''
+        host_key = self._host_key(url)
+        if not host_key:
+            return ''
+        headers = {str(k).lower(): str(v) for k, v in dict(headers or {}).items()}
+        wait = _parse_retry_after_seconds(headers.get('retry-after'))
+        reason = 'Retry-After'
+        if wait <= 0:
+            remaining = headers.get('x-ratelimit-remaining') or headers.get('x-rate-limit-remaining') or headers.get('ratelimit-remaining')
+            reset = headers.get('x-ratelimit-reset') or headers.get('x-rate-limit-reset') or headers.get('ratelimit-reset')
+            try:
+                remaining_count = int(float(remaining)) if remaining not in (None, '') else None
+            except ValueError:
+                remaining_count = None
+            reset_wait = _parse_rate_limit_reset_seconds(reset)
+            if remaining_count is not None and remaining_count <= 0 and reset_wait > 0:
+                wait = reset_wait
+                reason = 'X-RateLimit reset'
+        if wait <= 0 and int(status or 0) in (429, 503):
+            wait = 60.0
+            reason = f'HTTP {status}'
+        if wait <= 0:
+            return ''
+
+        state = self._state_for_host(host_key)
+        until = time.monotonic() + min(wait, 3600.0)
+        if until > float(state.get('cooldown_until', 0.0)):
+            state['cooldown_until'] = until
+            state['cooldown_reason'] = reason
+        return f"{host_key} cooling down for {min(wait, 3600.0):.1f}s ({reason})"
 
 
 from PyQt6.QtWidgets import (
@@ -3391,6 +3573,7 @@ class CrawlerWorker(QThread):
             f"{','.join(p.name for p in self._profiles)}"
         )
         self._challenge_notifications_sent = set()
+        self._crawl_budget = CrawlBudgetController(cfg)
 
     def _api_start_url_for_profile(self, profile):
         if len(self._profiles) == 1:
@@ -3470,6 +3653,18 @@ class CrawlerWorker(QThread):
 
     def log(self, msg, level='INFO'):
         self.log_signal.emit(f"[{datetime.now().strftime('%H:%M:%S')}] [{level:5s}] {msg}", level)
+
+    def _observe_crawl_budget_response(self, response_url, source_url, status, headers):
+        try:
+            response_host = urlparse(response_url).netloc.lower()
+            source_host = urlparse(source_url).netloc.lower()
+            if source_host and response_host and response_host != source_host:
+                return
+            message = self._crawl_budget.observe_response(response_url, status=status, headers=headers)
+            if message:
+                self.log(f"Crawl budget: {message}", "WARN")
+        except Exception as exc:
+            self.log(f"Crawl budget header observation skipped: {_redact_text(exc)}", "DEBUG")
 
     def _trace_enabled(self):
         return bool(self.cfg.get('crawl_trace_on_failure', True))
@@ -4071,6 +4266,7 @@ class CrawlerWorker(QThread):
 
     async def _on_response(self, response, source_url, clip_meta):
         url = response.url
+        self._observe_crawl_budget_response(url, source_url, getattr(response, 'status', 0), response.headers)
 
         # Capture direct video URL requests (M3U8, MP4, WebM, etc.)
         if self._video_re.search(url):
@@ -4737,6 +4933,7 @@ class CrawlerWorker(QThread):
         """Intercept JSON API responses on catalog pages for bulk clip data."""
         try:
             url = response.url
+            self._observe_crawl_budget_response(url, source_url, getattr(response, 'status', 0), response.headers)
             ct = response.headers.get('content-type', '')
             if 'json' not in ct:
                 return
@@ -5158,7 +5355,14 @@ class CrawlerWorker(QThread):
 
         # domcontentloaded is the only safe wait_until for Next.js SPAs.
         try:
-            await page.goto(url, wait_until='domcontentloaded', timeout=timeout)
+            allowed, reason = await self._crawl_budget.before_request(url, stop_event=self._stop, log=self.log)
+            if not allowed:
+                self.log(f"Crawl budget blocked navigation: {reason}", "WARN")
+                return False
+            response = await page.goto(url, wait_until='domcontentloaded', timeout=timeout)
+            if response:
+                self._observe_crawl_budget_response(
+                    response.url, url, getattr(response, 'status', 0), response.headers)
             return True
         except Exception as e:
             err = str(e)
@@ -9269,6 +9473,8 @@ class MainWindow(QMainWindow):
             'spin_m3u8_wait': ("M3U8 wait", "Dwell time after page load for stream discovery"),
             'spin_scroll_steps': ("Scroll steps", "Scroll passes on catalog pages"),
             'spin_timeout': ("Page timeout", "Maximum page load wait before skipping"),
+            'chk_respect_crawl_budget': ("Respect robots and rate limits", "Fetches robots.txt and observes Retry-After and rate-limit headers before navigating"),
+            'spin_crawl_budget_min_delay': ("Per-host minimum crawl gap", "Minimum delay between browser navigations to the same host"),
             'spin_max_pages': ("Maximum pages", "Stop after this many pages; zero means unlimited"),
             'spin_max_depth': ("Maximum crawl depth", "Link-following depth from the start URL"),
             'chk_headless': ("Headless mode", "Run the browser without a visible window"),
@@ -9381,6 +9587,7 @@ class MainWindow(QMainWindow):
     def _apply_focus_order(self):
         order = [
             'inp_url', 'combo_crawl_mode', 'btn_start', 'btn_pause', 'btn_stop',
+            'chk_respect_crawl_budget', 'spin_crawl_budget_min_delay',
             'chk_challenge_notify', 'inp_challenge_discord_webhook', 'inp_challenge_telegram_bot_token', 'inp_challenge_telegram_chat_id',
             'chk_rotate_browser_profiles', 'spin_browser_profile_slots', 'chk_proxy_pool', 'chk_residential_proxy_sticky', 'inp_proxy_pool_path',
             'inp_search', 'combo_sort', 'combo_duration', 'combo_user_collection',
@@ -9497,6 +9704,22 @@ class MainWindow(QMainWindow):
         g2.addLayout(spinrow("M3U8 wait:",    'spin_m3u8_wait',   500,15000,3000," ms","Dwell after load for player to fire M3U8 requests."))
         g2.addLayout(spinrow("Scroll steps:", 'spin_scroll_steps',   3,  200,  20,   "","Scroll passes on catalog pages."))
         g2.addLayout(spinrow("Page timeout:", 'spin_timeout',     5000,120000,30000," ms","Max load wait before skip."))
+        budget_row = QHBoxLayout()
+        self.chk_respect_crawl_budget = QCheckBox("Respect robots.txt and server rate-limit headers")
+        self.chk_respect_crawl_budget.setChecked(True)
+        self.chk_respect_crawl_budget.setToolTip("Fetch robots.txt per host, honor crawl-delay/request-rate, and cool down on Retry-After or X-RateLimit headers.")
+        budget_row.addWidget(self.chk_respect_crawl_budget)
+        budget_row.addSpacing(Z(18))
+        budget_row.addWidget(QLabel("Min host gap:"))
+        self.spin_crawl_budget_min_delay = QSpinBox()
+        self.spin_crawl_budget_min_delay.setRange(0, 120000)
+        self.spin_crawl_budget_min_delay.setSingleStep(250)
+        self.spin_crawl_budget_min_delay.setValue(0)
+        self.spin_crawl_budget_min_delay.setSuffix(" ms")
+        self.spin_crawl_budget_min_delay.setFixedWidth(Z(130))
+        budget_row.addWidget(self.spin_crawl_budget_min_delay)
+        budget_row.addStretch()
+        g2.addLayout(budget_row)
         lay.addWidget(grp2)
 
         # Limits
@@ -11284,6 +11507,9 @@ class MainWindow(QMainWindow):
             cfg['ui_zoom'] = self._zoom_combo.currentData() or 1.0
         if hasattr(self, 'spin_backup_retention'):
             cfg['backup_retention_count'] = self.spin_backup_retention.value()
+        if hasattr(self, 'chk_respect_crawl_budget'):
+            cfg['respect_crawl_budget'] = self.chk_respect_crawl_budget.isChecked()
+            cfg['crawl_budget_min_delay_ms'] = self.spin_crawl_budget_min_delay.value()
         if hasattr(self, 'chk_challenge_notify'):
             cfg['challenge_notify_enabled'] = self.chk_challenge_notify.isChecked()
             cfg['challenge_discord_webhook_url'] = self.inp_challenge_discord_webhook.text().strip()
@@ -12503,6 +12729,10 @@ class MainWindow(QMainWindow):
             self.spin_bw_limit.setValue(cfg['bw_limit'])
         if 'backup_retention_count' in cfg and hasattr(self, 'spin_backup_retention'):
             self.spin_backup_retention.setValue(max(1, min(500, int(cfg['backup_retention_count']))))
+        if hasattr(self, 'chk_respect_crawl_budget'):
+            self.chk_respect_crawl_budget.setChecked(_cfg_bool(cfg, 'respect_crawl_budget', True))
+            if 'crawl_budget_min_delay_ms' in cfg:
+                self.spin_crawl_budget_min_delay.setValue(_bounded_int(cfg.get('crawl_budget_min_delay_ms'), 0, 0, 120000))
         if hasattr(self, 'chk_challenge_notify'):
             self.chk_challenge_notify.setChecked(_cfg_bool(cfg, 'challenge_notify_enabled', False))
             self.inp_challenge_discord_webhook.setText(str(cfg.get('challenge_discord_webhook_url', '') or ''))
