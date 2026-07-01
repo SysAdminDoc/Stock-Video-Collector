@@ -3278,7 +3278,11 @@ register_builtin_profiles(SiteProfile)
 
 
 def _load_user_plugins():
-    """Discover and load user site plugins from user_profiles/ directory."""
+    """Discover and load user site plugins from user_profiles/ directory.
+    Only runs when 'enable_user_plugins' is true in config (opt-in)."""
+    cfg = load_config() or {}
+    if not cfg.get('enable_user_plugins', False):
+        return
     import importlib.util
     plugin_dir = Path(__file__).resolve().parent / 'user_profiles'
     if not plugin_dir.is_dir():
@@ -10249,8 +10253,11 @@ class MainWindow(QMainWindow):
         self.chk_crawl_trace = QCheckBox("Save failed-crawl diagnostics")
         self.chk_crawl_trace.setChecked(True)
         self.chk_crawl_trace.setToolTip("On crawler failures, save a redacted trace, HTML snapshot, screenshot, and network log.")
+        self.chk_user_plugins = QCheckBox("Load user plugins")
+        self.chk_user_plugins.setToolTip("Enable loading of custom site profiles from user_profiles/ directory (requires app restart)")
         g4.addWidget(self.chk_headless); g4.addSpacing(Z(30)); g4.addWidget(self.chk_resume)
-        g4.addSpacing(Z(30)); g4.addWidget(self.chk_crawl_trace); g4.addStretch()
+        g4.addSpacing(Z(30)); g4.addWidget(self.chk_crawl_trace)
+        g4.addSpacing(Z(30)); g4.addWidget(self.chk_user_plugins); g4.addStretch()
         lay.addWidget(grp4)
 
         # Human-in-the-loop challenge notifications
@@ -12269,6 +12276,7 @@ class MainWindow(QMainWindow):
             'headless':     self.chk_headless.isChecked(),
             'resume':       self.chk_resume.isChecked(),
             'crawl_trace_on_failure': self.chk_crawl_trace.isChecked() if hasattr(self, 'chk_crawl_trace') else True,
+            'enable_user_plugins': self.chk_user_plugins.isChecked() if hasattr(self, 'chk_user_plugins') else False,
             'output_dir':   self.inp_output.text().strip(),
             'dl_dir':       self.inp_dl_dir.text().strip(),
         }
@@ -13770,6 +13778,8 @@ class MainWindow(QMainWindow):
         if 'resume'   in cfg: self.chk_resume.setChecked(cfg['resume'])
         if 'crawl_trace_on_failure' in cfg and hasattr(self, 'chk_crawl_trace'):
             self.chk_crawl_trace.setChecked(bool(cfg['crawl_trace_on_failure']))
+        if hasattr(self, 'chk_user_plugins'):
+            self.chk_user_plugins.setChecked(bool(cfg.get('enable_user_plugins', False)))
         if hasattr(self, 'chk_use_official_apis'):
             self.chk_use_official_apis.setChecked(bool(cfg.get('use_official_apis', True)))
             self.inp_api_search_query.setText(str(cfg.get('api_search_query', '') or ''))
