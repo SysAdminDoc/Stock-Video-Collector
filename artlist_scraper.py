@@ -11526,6 +11526,32 @@ class MainWindow(QMainWindow):
         self.lbl_scan_result.setStyleSheet(f"color:{C('success')};"); gscan.addWidget(self.lbl_scan_result)
         lay.addWidget(grp_scan)
 
+        # Watermark stripper
+        grp_wm = QGroupBox("Batch Watermark Stripper")
+        gwm = QVBoxLayout(grp_wm)
+        gwm.addWidget(self._sub("Remove watermarks from your own uploaded clips using ffmpeg delogo filter."))
+        wm_row = QHBoxLayout()
+        self.inp_wm_dir = QLineEdit(); self.inp_wm_dir.setPlaceholderText("Folder with watermarked videos...")
+        wm_row.addWidget(self.inp_wm_dir, 1)
+        wm_br = QPushButton("Browse..."); wm_br.setObjectName("neutral"); wm_br.setFixedWidth(Z(90))
+        wm_br.clicked.connect(lambda: self.inp_wm_dir.setText(
+            QFileDialog.getExistingDirectory(self, "Select Watermark Source Folder") or self.inp_wm_dir.text()))
+        wm_row.addWidget(wm_br)
+        gwm.addLayout(wm_row)
+        wm_cfg = QHBoxLayout()
+        wm_cfg.addWidget(QLabel("Region (x:y:w:h):"))
+        self.inp_wm_region = QLineEdit("10:10:200:50")
+        self.inp_wm_region.setFixedWidth(Z(140))
+        self.inp_wm_region.setToolTip("Delogo region in pixels: x:y:width:height")
+        wm_cfg.addWidget(self.inp_wm_region)
+        wm_cfg.addStretch()
+        gwm.addLayout(wm_cfg)
+        wmbtn = QPushButton("Strip Watermarks"); wmbtn.setObjectName("warning"); wmbtn.setFixedHeight(Z(38)); wmbtn.setFixedWidth(Z(180))
+        wmbtn.clicked.connect(self._batch_strip_watermarks); gwm.addWidget(wmbtn)
+        self.lbl_wm_result = QLabel(""); self.lbl_wm_result.setWordWrap(True)
+        self.lbl_wm_result.setStyleSheet(f"color:{C('success')};"); gwm.addWidget(self.lbl_wm_result)
+        lay.addWidget(grp_wm)
+
         # Filename template
         grp_fn = QGroupBox("Filename Template"); gfn = QVBoxLayout(grp_fn)
         gfn.addWidget(self._sub("Tokens: {title}  {clip_id}  {creator}  {collection}  {resolution}"))
@@ -11579,8 +11605,109 @@ class MainWindow(QMainWindow):
         gp.addWidget(cfg_path_lbl)
         lay.addWidget(grp_paths)
 
+        # Watch Folder
+        grp_watch = QGroupBox("Watch Folder")
+        gw = QVBoxLayout(grp_watch)
+        gw.addWidget(self._sub("Automatically import video files dropped into a watched folder."))
+        wrow = QHBoxLayout()
+        self.inp_watch_folder = QLineEdit()
+        self.inp_watch_folder.setPlaceholderText("Select folder to watch for new video files...")
+        wrow.addWidget(self.inp_watch_folder, 1)
+        br_watch = QPushButton("Browse..."); br_watch.setObjectName("neutral"); br_watch.setFixedWidth(Z(90))
+        br_watch.clicked.connect(self._browse_watch_folder); wrow.addWidget(br_watch)
+        gw.addLayout(wrow)
+        watch_ctl = QHBoxLayout()
+        self.btn_watch_start = QPushButton("Start Watching"); self.btn_watch_start.setObjectName("success")
+        self.btn_watch_start.setFixedHeight(Z(32)); self.btn_watch_start.clicked.connect(self._start_watch_folder)
+        self.btn_watch_stop = QPushButton("Stop Watching"); self.btn_watch_stop.setObjectName("danger")
+        self.btn_watch_stop.setFixedHeight(Z(32)); self.btn_watch_stop.setEnabled(False)
+        self.btn_watch_stop.clicked.connect(self._stop_watch_folder)
+        self.lbl_watch_status = QLabel("Not watching")
+        self.lbl_watch_status.setStyleSheet(f"color:{C('text_muted')};")
+        watch_ctl.addWidget(self.btn_watch_start); watch_ctl.addWidget(self.btn_watch_stop)
+        watch_ctl.addWidget(self.lbl_watch_status); watch_ctl.addStretch()
+        gw.addLayout(watch_ctl)
+        lay.addWidget(grp_watch)
+
         lay.addStretch()
         return scroll
+
+    def _browse_watch_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Watch Folder")
+        if folder:
+            self.inp_watch_folder.setText(folder)
+
+    def _start_watch_folder(self):
+        from PyQt6.QtCore import QFileSystemWatcher
+        folder = self.inp_watch_folder.text().strip()
+        if not folder or not os.path.isdir(folder):
+            self._toast("Select a valid folder first", 'warning', 2000)
+            return
+        self._watch_folder_path = folder
+        self._watch_existing = set(os.listdir(folder))
+        self._file_watcher = QFileSystemWatcher([folder])
+        self._file_watcher.directoryChanged.connect(self._on_watch_folder_changed)
+        self.btn_watch_start.setEnabled(False)
+        self.btn_watch_stop.setEnabled(True)
+        self.lbl_watch_status.setText(f"Watching: {folder}")
+        self.lbl_watch_status.setStyleSheet(f"color:{C('success')};")
+        cfg = load_config() or {}
+        cfg['watch_folder'] = folder
+        save_config(cfg)
+
+    def _stop_watch_folder(self):
+        if hasattr(self, '_file_watcher'):
+            self._file_watcher.removePaths(self._file_watcher.directories())
+            del self._file_watcher
+        self.btn_watch_start.setEnabled(True)
+        self.btn_watch_stop.setEnabled(False)
+        self.lbl_watch_status.setText("Not watching")
+        self.lbl_watch_status.setStyleSheet(f"color:{C('text_muted')};")
+
+    def _on_watch_folder_changed(self, path):
+        VIDEO_EXTS = {'.mp4', '.webm', '.mkv', '.avi', '.mov', '.m4v', '.flv', '.wmv', '.ts', '.mts'}
+        current = set(os.listdir(path))
+        new_files = current - self._watch_existing
+        self._watch_existing = current
+        imported = 0
+        for fname in new_files:
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in VIDEO_EXTS:
+                continue
+            fpath = os.path.join(path, fname)
+            if not os.path.isfile(fpath):
+                continue
+            clip_id = 'watch_' + hashlib.md5(os.path.abspath(fpath).encode()).hexdigest()[:12]
+            existing = self.db.execute("SELECT clip_id FROM clips WHERE clip_id=?", (clip_id,)).fetchone()
+            if existing:
+                continue
+            title = os.path.splitext(fname)[0]
+            clip = {
+                'clip_id': clip_id, 'title': title, 'source_url': fpath,
+                'source_site': 'Watch Folder', 'm3u8_url': '', 'local_path': fpath,
+                'dl_status': 'done', 'collection': os.path.basename(path),
+            }
+            ffprobe = _get_ffprobe()
+            if ffprobe:
+                try:
+                    info = json.loads(subprocess.run(
+                        [ffprobe, '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', fpath],
+                        capture_output=True, text=True, timeout=10).stdout)
+                    for s in info.get('streams', []):
+                        if s.get('codec_type') == 'video':
+                            clip['resolution'] = f"{s.get('width', '?')}x{s.get('height', '?')}"
+                            break
+                    dur = float(info.get('format', {}).get('duration', 0))
+                    if dur:
+                        clip['duration'] = _format_duration_seconds(dur)
+                except Exception:
+                    pass
+            self.db.save_clip(clip)
+            self.db.update_local_path(clip_id, fpath, 'done')
+            imported += 1
+        if imported:
+            self._do_search()
+            self._toast(f"Watch folder: imported {imported} new clip(s)", 'success', 3000)
 
     def _open_path(self, path):
         """Open a file or directory in the system file manager."""
@@ -11701,6 +11828,67 @@ class MainWindow(QMainWindow):
             preview = tpl.format(**sample)+'.mp4'
             self.lbl_fn_preview.setText(f"Preview: {preview}")
         except Exception as e: self.lbl_fn_preview.setText(f"Invalid template: {e}")
+
+    def _batch_strip_watermarks(self):
+        folder = self.inp_wm_dir.text().strip()
+        if not folder or not os.path.isdir(folder):
+            self._toast("Select a valid folder first", 'warning', 2000)
+            return
+        region = self.inp_wm_region.text().strip()
+        parts = region.split(':')
+        if len(parts) != 4:
+            self._toast("Region must be x:y:w:h format", 'warning', 2000)
+            return
+        try:
+            x, y, w, h = [int(p) for p in parts]
+        except ValueError:
+            self._toast("Region values must be integers", 'warning', 2000)
+            return
+
+        ffmpeg = _get_ffmpeg()
+        if not ffmpeg:
+            self._toast("ffmpeg not found", 'error', 3000)
+            return
+
+        VIDEO_EXTS = {'.mp4', '.webm', '.mkv', '.avi', '.mov'}
+        files = [f for f in os.listdir(folder) if os.path.splitext(f)[1].lower() in VIDEO_EXTS]
+        if not files:
+            self.lbl_wm_result.setText("No video files found in folder.")
+            return
+
+        self.lbl_wm_result.setText(f"Processing {len(files)} files...")
+        out_dir = os.path.join(folder, 'stripped')
+        os.makedirs(out_dir, exist_ok=True)
+
+        def _run():
+            done, failed = 0, 0
+            for fname in files:
+                inp = os.path.join(folder, fname)
+                outp = os.path.join(out_dir, fname)
+                if os.path.isfile(outp):
+                    done += 1
+                    continue
+                cmd = [
+                    ffmpeg, '-y', '-i', inp,
+                    '-vf', f'delogo=x={x}:y={y}:w={w}:h={h}',
+                    '-c:a', 'copy', '-movflags', '+faststart', outp
+                ]
+                try:
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                    if result.returncode == 0 and os.path.isfile(outp):
+                        done += 1
+                    else:
+                        failed += 1
+                except Exception:
+                    failed += 1
+            return f"Stripped {done} files ({failed} failed) -> {out_dir}"
+
+        w = BackgroundWorker(_run)
+        w.result_signal.connect(lambda msg: self.lbl_wm_result.setText(msg))
+        w.error_signal.connect(lambda e: self.lbl_wm_result.setText(f"Error: {e}"))
+        self._bg_workers.append(w)
+        w.finished.connect(lambda: self._bg_workers.remove(w) if w in self._bg_workers else None)
+        w.start()
 
     def _retry_all_errors(self):
         rows = self.db.execute("SELECT * FROM clips WHERE dl_status='error' AND m3u8_url!=''").fetchall()
@@ -13465,6 +13653,8 @@ class MainWindow(QMainWindow):
         if 'bw_schedule' in cfg and hasattr(self, 'combo_bw_schedule'):
             idx = self.combo_bw_schedule.findData(cfg['bw_schedule'])
             if idx >= 0: self.combo_bw_schedule.setCurrentIndex(idx)
+        if 'watch_folder' in cfg and hasattr(self, 'inp_watch_folder'):
+            self.inp_watch_folder.setText(cfg['watch_folder'])
         if 'backup_retention_count' in cfg and hasattr(self, 'spin_backup_retention'):
             self.spin_backup_retention.setValue(max(1, min(500, int(cfg['backup_retention_count']))))
         if hasattr(self, 'chk_respect_crawl_budget'):
