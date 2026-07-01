@@ -7789,10 +7789,13 @@ class YtDlpIngestWorker(QThread):
                 saved += 1 if is_new else 0
                 if seen % 10 == 0:
                     self.stats_signal.emit(self.db.stats())
-            rc = self._proc.wait(timeout=10)
-            stderr = ''
-            if self._proc.stderr:
-                stderr = _redact_text(self._proc.stderr.read() or '').strip()
+            try:
+                _, stderr_bytes = self._proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+                _, stderr_bytes = self._proc.communicate(timeout=5)
+            rc = self._proc.returncode
+            stderr = _redact_text(stderr_bytes or '').strip()
             if rc not in (0, None) and stderr:
                 self.log(f"yt-dlp exited with {rc}: {stderr[:500]}", "WARN")
             self.log(f"yt-dlp ingest complete: {seen} inspected, {saved} new, {skipped} skipped non-CC/malformed", "OK")
@@ -11795,6 +11798,7 @@ class MainWindow(QMainWindow):
         db = self.db
 
         def _run():
+            import time as _t
             imported = 0
             for fname, fpath in video_files:
                 clip_id = 'watch_' + hashlib.md5(os.path.abspath(fpath).encode()).hexdigest()[:12]
@@ -11805,6 +11809,13 @@ class MainWindow(QMainWindow):
                     fsize = os.path.getsize(fpath)
                     if fsize == 0:
                         continue
+                    _t.sleep(1)
+                    fsize2 = os.path.getsize(fpath)
+                    if fsize2 != fsize:
+                        _t.sleep(2)
+                        fsize3 = os.path.getsize(fpath)
+                        if fsize3 != fsize2:
+                            continue
                 except OSError:
                     continue
                 title = os.path.splitext(fname)[0]
