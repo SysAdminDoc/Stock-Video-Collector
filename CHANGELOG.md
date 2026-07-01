@@ -2,6 +2,24 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.8.0] - 2026-07-01
+
+- Added: yt-dlp fallback — download worker tries yt-dlp when ffmpeg download fails.
+- Added: Priority queue (high/normal/low) replaces FIFO download queue.
+- Added: Per-site concurrent download cap to prevent hammering individual hosts.
+- Added: Locked collections — lock/unlock prevents accidental add/remove of clips.
+- Added: Tag editor dialog with bulk rename, merge, and split operations.
+- Added: Saved-search feed notifications — alerts on new matches since last run.
+- Added: Premiere/Resolve XML export (xmeml v5) with resolution metadata and local paths.
+- Added: Final Cut Pro FCPXML 1.9 export with asset resources and spine clips.
+- Added: Post-download transcode presets (H.264 1080p proxy, HEVC 4K archive, ProRes master).
+- Added: Bandwidth schedule with time-based throttle/block profiles (daytime, business, night).
+- Added: Watch folder auto-imports new video files with QFileSystemWatcher and ffprobe metadata.
+- Added: Batch watermark stripper using ffmpeg delogo filter for user-owned clips.
+- Added: User site plugin interface — drop-in `user_profiles/*.py` modules auto-register.
+- Added: Scheduled crawls with configurable 1–168 hour intervals using QTimer.
+- Added: Accurate HLS resume — partial downloads validated and promoted or re-downloaded.
+
 ## [v0.7.32] - 2026-07-01
 
 - Added: Per-host crawl-budget guardrails that fetch robots.txt, enforce crawl-delay/request-rate policies, and cool down on Retry-After or X-RateLimit headers.

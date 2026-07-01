@@ -1,6 +1,6 @@
 # Stock Video Collector
 
-![Version](https://img.shields.io/badge/version-0.7.32-blue)
+![Version](https://img.shields.io/badge/version-0.8.0-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white)
 ![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?logo=qt&logoColor=white)
 ![Playwright](https://img.shields.io/badge/Playwright-Headless_Browser-2EAD33?logo=playwright&logoColor=white)
@@ -161,7 +161,8 @@ The crawler uses four complementary strategies to find video URLs on every page:
 | Favorites | Quick-toggle favorite flag for any clip |
 | Notes | Free-text notes per clip |
 | User tags | Custom tag system independent of source tags |
-| Collections | Organize clips into named collections with color coding |
+| Collections | Organize clips into named collections with color coding and lock/unlock for curation |
+| Tag editor | Bulk rename, merge, and split user tags across all clips |
 | Bulk operations | Context menu actions on any card in the grid |
 | Duplicate review | Exact SHA-256 and near visual-hash groups with Library filter and keep/ignore/review actions |
 
@@ -171,8 +172,14 @@ The crawler uses four complementary strategies to find video URLs on every page:
 |---------|-------------|
 | Concurrent downloads | Configurable parallel download workers (default: 2) |
 | ffmpeg HLS→MP4 | Automatic M3U8-to-MP4 conversion via ffmpeg |
+| yt-dlp fallback | Automatic fallback to yt-dlp when ffmpeg download fails |
 | Retry with backoff | Exponential backoff retry (configurable max attempts) |
 | Atomic writes & validation | Downloads write to `.part`, validate the video stream, then atomically promote to MP4 |
+| Accurate HLS resume | Validates partial downloads on resume and promotes or re-downloads |
+| Priority queue | High/Normal/Low download priorities with priority queue ordering |
+| Per-site concurrency caps | Configurable max concurrent downloads per source site |
+| Bandwidth schedule | Time-based speed profiles (throttle daytime, business hours, nights only) |
+| Post-download transcode | Automatic transcode presets: H.264 1080p proxy, HEVC 4K archive, ProRes master |
 | Speed & ETA tracking | Real-time download speed and estimated completion time |
 | Bandwidth limiting | Optional download speed cap |
 | Filename templates | Customizable output filenames: `{title}`, `{clip_id}`, `{creator}`, `{collection}`, `{resolution}` |
@@ -187,6 +194,8 @@ The crawler uses four complementary strategies to find video URLs on every page:
 | `.json` | Full metadata for all clips (title, creator, tags, URLs, timestamps, license/provenance fields, embedded rights report) |
 | `.m3u` | Media player playlist — uses local path if downloaded, M3U8 URL otherwise |
 | `.csv` | Spreadsheet-ready with clip, source, license/provenance, embedded rights, and duplicate-review metadata columns |
+| `.xml` | Adobe Premiere / DaVinci Resolve bin (xmeml v5) with resolution metadata and local file paths |
+| `.fcpxml` | Final Cut Pro (FCPXML 1.9) with asset resources and spine clips |
 | **Batch** | Export all four formats at once |
 | **Handoff package** | Portable folder + ZIP with copied media, thumbnails, sidecars, provenance manifest, attribution file, and SHA-256 checksums |
 
@@ -202,6 +211,11 @@ The crawler uses four complementary strategies to find video URLs on every page:
 | Toast notifications | Non-blocking status notifications |
 | Live crawl log | Real-time scrolling log with verbose/quiet toggle |
 | Clipboard monitor | Opt-in URL detection from clipboard (auto-fills crawl URL input) |
+| Scheduled crawls | Automatic re-crawl at configurable intervals (1–168 hours) |
+| Watch folder | QFileSystemWatcher auto-imports new video files with ffprobe metadata |
+| Saved-search feeds | New-match notifications when saved search results grow |
+| Watermark stripper | Batch ffmpeg delogo filter for user-owned watermarked clips |
+| User site plugins | Drop-in `user_profiles/*.py` modules auto-register without touching core |
 | Accessibility metadata | Major controls, status surfaces, and media cards expose accessible names/descriptions |
 
 ---
