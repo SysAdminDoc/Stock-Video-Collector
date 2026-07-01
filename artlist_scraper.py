@@ -379,7 +379,7 @@ def _host_is_unsafe(host, port=None):
         try:
             infos = socket.getaddrinfo(ascii_host, port or 443, type=socket.SOCK_STREAM)
         except OSError:
-            return ""
+            return "DNS resolution failed"
         for info in infos:
             sockaddr = info[4]
             if not sockaddr:
@@ -1303,6 +1303,7 @@ class DB:
         self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
+        self._fts_recovering = False
         self._init()
 
     @staticmethod
@@ -2609,11 +2610,9 @@ class DB:
             print(f"[DB ERROR] FTS rebuild failed: {e}")
             return -1
 
-    _fts_recovering = False
-
     def _fts_recover(self):
         """Auto-recover from FTS corruption. Called from within lock scope."""
-        if self._fts_recovering:
+        if getattr(self, '_fts_recovering', False):
             return False
         self._fts_recovering = True
         print("[DB] FTS corruption detected — running automatic recovery...")
@@ -8900,6 +8899,20 @@ class DownloadWorker(QThread):
             if self._stop.is_set():
                 return 'transient'
 
+            actual_path = out_path
+            if not os.path.isfile(actual_path):
+                base = os.path.splitext(out_path)[0]
+                for ext in ('.mp4', '.mkv', '.webm', '.mov', '.mp4.part'):
+                    candidate = base + ext
+                    if os.path.isfile(candidate) and os.path.getsize(candidate) > 0:
+                        actual_path = candidate
+                        break
+            if actual_path != out_path and os.path.isfile(actual_path):
+                try:
+                    os.replace(actual_path, out_path)
+                except OSError:
+                    out_path = actual_path
+
             if rc == 0 and os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
                 valid, reason = _validate_video_file(out_path, ffmpeg)
                 if not valid:
@@ -9330,17 +9343,19 @@ class DownloadWorker(QThread):
                 else:
                     speed_final = ""
 
-                # Post-download transcode if preset is configured
-                transcode_preset = self._transcode_preset
-                if transcode_preset and transcode_preset != 'none':
-                    tc_path = self._run_transcode(out_path, ffmpeg, transcode_preset, clip_id)
-                    if tc_path:
-                        out_path = tc_path
-
                 file_hash = _sha256_file(out_path)
                 visual_hash = _video_perceptual_hash(out_path, ffmpeg)
                 clip_data['file_sha256'] = file_hash
                 clip_data['perceptual_hash'] = visual_hash
+
+                # Post-download transcode (produces a companion file, keeps original)
+                transcode_preset = self._transcode_preset
+                tc_path = None
+                if transcode_preset and transcode_preset != 'none':
+                    tc_path = self._run_transcode(out_path, ffmpeg, transcode_preset, clip_id)
+                    if tc_path:
+                        clip_data['transcode_path'] = tc_path
+
                 self._write_sidecar(clip_data, out_path)
                 self.db.update_local_path(clip_id, out_path, 'done')
                 if hasattr(self.db, 'update_duplicate_fingerprints'):
@@ -9348,7 +9363,7 @@ class DownloadWorker(QThread):
                 self._extract_thumb(clip_id, out_path)
                 done_text = f"Done  |  {size_str}"
                 if speed_final: done_text += f"  |  avg {speed_final}"
-                if transcode_preset and transcode_preset != 'none':
+                if tc_path:
                     done_text += f"  |  {transcode_preset}"
                 self.progress_signal.emit(clip_id, 100, done_text)
                 self.log(f"Done: {filename}  ({size_str}, {speed_final})", "OK")
