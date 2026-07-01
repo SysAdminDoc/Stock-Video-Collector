@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -18,7 +19,11 @@ class ConfigPathMigrationTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.old_appdata = os.environ.get("APPDATA")
+        self.old_portable = os.environ.get(app.PORTABLE_ENV)
+        self.old_argv = list(sys.argv)
         os.environ["APPDATA"] = self.tmp.name
+        os.environ.pop(app.PORTABLE_ENV, None)
+        sys.argv = [sys.argv[0]]
         app._CONFIG_MIGRATION_MESSAGE = ""
         app._CONFIG_MIGRATED_DIRS.clear()
 
@@ -27,6 +32,11 @@ class ConfigPathMigrationTests(unittest.TestCase):
             os.environ.pop("APPDATA", None)
         else:
             os.environ["APPDATA"] = self.old_appdata
+        if self.old_portable is None:
+            os.environ.pop(app.PORTABLE_ENV, None)
+        else:
+            os.environ[app.PORTABLE_ENV] = self.old_portable
+        sys.argv = self.old_argv
         app._CONFIG_MIGRATION_MESSAGE = ""
         app._CONFIG_MIGRATED_DIRS.clear()
         self.tmp.cleanup()
@@ -81,6 +91,51 @@ class ConfigPathMigrationTests(unittest.TestCase):
 
         self.assertEqual(output_dir.name, "output")
         self.assertEqual(output_dir.parent.name, app.APP_CONFIG_DIR_NAME)
+
+    def test_portable_env_stores_config_and_output_under_app_directory(self):
+        app_root = Path(self.tmp.name) / "app"
+        app_root.mkdir()
+        os.environ[app.PORTABLE_ENV] = "1"
+
+        with mock.patch.object(app, "_app_root_dir", return_value=app_root):
+            config_dir = Path(app.get_config_dir())
+            output_dir = Path(app._default_output_dir())
+            thumb_dir = Path(app.get_thumbnail_cache_dir())
+            diag = app.get_config_diagnostics()
+
+        self.assertEqual(config_dir, app_root / app.PORTABLE_DATA_DIR_NAME)
+        self.assertEqual(output_dir, config_dir / "output")
+        self.assertEqual(thumb_dir, config_dir / "thumbnails")
+        self.assertEqual(diag["mode"], "portable")
+        self.assertEqual(diag["trigger"], "env")
+        self.assertIn(app.PORTABLE_SENTINEL_NAME, diag["sentinel"])
+
+    def test_portable_cli_flag_enables_portable_mode(self):
+        app_root = Path(self.tmp.name) / "cli-app"
+        app_root.mkdir()
+        sys.argv = [self.old_argv[0], "--portable"]
+
+        with mock.patch.object(app, "_app_root_dir", return_value=app_root):
+            self.assertTrue(app.is_portable_mode())
+            self.assertEqual(Path(app.get_config_dir()), app_root / app.PORTABLE_DATA_DIR_NAME)
+            self.assertEqual(app.get_config_diagnostics()["trigger"], "cli")
+
+    def test_portable_sentinel_enables_portable_mode_without_legacy_migration(self):
+        app_root = Path(self.tmp.name) / "sentinel-app"
+        app_root.mkdir()
+        (app_root / app.PORTABLE_SENTINEL_NAME).write_text("portable", encoding="utf-8")
+        legacy = Path(self.tmp.name) / app.LEGACY_APP_CONFIG_DIR_NAME
+        legacy.mkdir()
+        (legacy / "config.json").write_text(json.dumps({"source": "legacy"}), encoding="utf-8")
+
+        with mock.patch.object(app, "_app_root_dir", return_value=app_root):
+            config_dir = Path(app.get_config_dir())
+            diag = app.get_config_diagnostics()
+
+        self.assertEqual(config_dir, app_root / app.PORTABLE_DATA_DIR_NAME)
+        self.assertEqual(diag["trigger"], "sentinel")
+        self.assertFalse((config_dir / "config.json").exists())
+        self.assertEqual(app._consume_config_migration_message(), "")
 
 
 if __name__ == "__main__":

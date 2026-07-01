@@ -81,10 +81,13 @@ import secrets as _secrets
 
 APP_NAME = "Stock Video Collector"
 APP_PACKAGE_NAME = "Stock-Video-Collector"
-APP_VERSION = "0.7.23"
+APP_VERSION = "0.7.24"
 APP_WINDOW_TITLE = f"{APP_NAME}  v{APP_VERSION}"
 APP_CONFIG_DIR_NAME = "StockVideoCollector"
 LEGACY_APP_CONFIG_DIR_NAME = "ArtlistScraper"
+PORTABLE_DATA_DIR_NAME = "portable-data"
+PORTABLE_SENTINEL_NAME = "portable.flag"
+PORTABLE_ENV = "STOCK_VIDEO_COLLECTOR_PORTABLE"
 SECRET_KEYRING_SERVICE = APP_PACKAGE_NAME
 DISABLE_KEYRING_ENV = "STOCK_VIDEO_COLLECTOR_DISABLE_KEYRING"
 
@@ -2117,6 +2120,52 @@ _LEGACY_CONFIG_MIGRATION_DIRS = (
 )
 
 
+def _app_root_dir():
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def _portable_env_enabled():
+    return str(os.environ.get(PORTABLE_ENV, "")).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _portable_cli_enabled():
+    return "--portable" in {str(arg).strip().lower() for arg in sys.argv[1:]}
+
+
+def _portable_sentinel_path():
+    return _app_root_dir() / PORTABLE_SENTINEL_NAME
+
+
+def is_portable_mode():
+    return _portable_env_enabled() or _portable_cli_enabled() or _portable_sentinel_path().is_file()
+
+
+def _portable_data_dir():
+    return _app_root_dir() / PORTABLE_DATA_DIR_NAME
+
+
+def get_config_diagnostics():
+    portable = is_portable_mode()
+    config_dir = Path(get_config_dir())
+    return {
+        'mode': 'portable' if portable else 'profile',
+        'portable': portable,
+        'trigger': (
+            'env' if _portable_env_enabled() else
+            'cli' if _portable_cli_enabled() else
+            'sentinel' if _portable_sentinel_path().is_file() else
+            'profile'
+        ),
+        'app_root': str(_app_root_dir()),
+        'config_dir': str(config_dir),
+        'output_dir': _default_output_dir(),
+        'thumbnail_dir': str(config_dir / 'thumbnails'),
+        'sentinel': str(_portable_sentinel_path()),
+    }
+
+
 def _config_base_dir():
     return os.environ.get('APPDATA', os.path.expanduser('~'))
 
@@ -2180,6 +2229,10 @@ def _consume_config_migration_message():
 
 
 def get_config_dir():
+    if is_portable_mode():
+        current = _portable_data_dir()
+        os.makedirs(current, exist_ok=True)
+        return str(current)
     base = _config_base_dir()
     current = os.path.join(base, APP_CONFIG_DIR_NAME)
     legacy = os.path.join(base, LEGACY_APP_CONFIG_DIR_NAME)
@@ -2189,6 +2242,8 @@ def get_config_dir():
 
 
 def _default_output_dir():
+    if is_portable_mode():
+        return str(Path(get_config_dir()) / 'output')
     return os.path.join(os.path.expanduser('~'), APP_CONFIG_DIR_NAME, 'output')
 
 
@@ -8182,7 +8237,8 @@ class MainWindow(QMainWindow):
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        self.status_bar.showMessage("Ready  —  DB: " + self._db_path)
+        cfg_diag = get_config_diagnostics()
+        self.status_bar.showMessage(f"Ready - {cfg_diag['mode']} config - DB: {self._db_path}")
         self._apply_accessibility_metadata()
 
     def _build_header(self):
@@ -9872,7 +9928,12 @@ class MainWindow(QMainWindow):
         btn_out_dir.clicked.connect(lambda: self._open_path(self._out_dir()))
         path_row.addWidget(btn_out_dir)
         path_row.addStretch(); gp.addLayout(path_row)
-        cfg_path_lbl = QLabel(f"Config: {get_config_dir()}")
+        cfg_diag = get_config_diagnostics()
+        cfg_path_lbl = QLabel(
+            f"Mode: {cfg_diag['mode']} ({cfg_diag['trigger']})\n"
+            f"Config: {cfg_diag['config_dir']}\n"
+            f"Output: {cfg_diag['output_dir']}\n"
+            f"Portable sentinel: {cfg_diag['sentinel']}")
         cfg_path_lbl.setStyleSheet(f"color:{C('text_muted')}; font-size:{Z(10)}px; font-family:'Cascadia Code','JetBrains Mono',Consolas,monospace;")
         cfg_path_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         gp.addWidget(cfg_path_lbl)

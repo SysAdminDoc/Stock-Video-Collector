@@ -1,6 +1,6 @@
 # Stock Video Collector
 
-![Version](https://img.shields.io/badge/version-0.7.23-blue)
+![Version](https://img.shields.io/badge/version-0.7.24-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white)
 ![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?logo=qt&logoColor=white)
 ![Playwright](https://img.shields.io/badge/Playwright-Headless_Browser-2EAD33?logo=playwright&logoColor=white)
@@ -22,6 +22,14 @@ py -3 -m venv .venv
 .\.venv\Scripts\python -m playwright install chromium
 .\.venv\Scripts\python artlist_scraper.py
 ```
+
+Portable mode keeps config, database, thumbnails, and default output beside the app under `portable-data`:
+
+```bash
+.\.venv\Scripts\python artlist_scraper.py --portable
+```
+
+Creating a `portable.flag` file beside the script or EXE enables the same mode without command-line arguments.
 
 The setup installs:
 
@@ -77,6 +85,7 @@ The **Generic** profile works on any site — it intercepts all video network re
 | Official API connectors | Optional API-first crawling for Pexels, Pixabay, Vimeo, and Adobe Stock when keys/tokens are configured, with browser fallback |
 | Fetch safety policy | App-initiated HTTP(S) fetches block localhost, private/link-local networks, metadata services, ambiguous IP literals, and redirect-to-private targets |
 | App-data migration | Legacy `ArtlistScraper` config, vault, database, and backup files are copied into `StockVideoCollector` without overwriting current data |
+| Portable mode | `--portable`, `STOCK_VIDEO_COLLECTOR_PORTABLE=1`, or `portable.flag` stores config, database, thumbnails, and default output under the app directory |
 | Failed-crawl diagnostics | Browser crawls can save redacted trace, HTML snapshot, screenshot, and network log bundles for replay/debugging |
 
 ### Video Discovery
@@ -272,7 +281,7 @@ Available variables: `{title}`, `{clip_id}`, `{creator}`, `{collection}`, `{reso
 
 **Config contains `__secret_ref__` values** — Sensitive settings are stored through the OS keyring when available, or the local encrypted vault when not available, and are hydrated automatically at runtime.
 
-**Where is app data stored?** — Current config, vault, database, backups, browser profile, and thumbnail cache live under `StockVideoCollector`. Existing `ArtlistScraper` config, vault, database, and backups are copied forward on startup without deleting or overwriting legacy data.
+**Where is app data stored?** — Profile mode stores config, vault, database, backups, browser profile, and thumbnail cache under `StockVideoCollector`. Portable mode stores them under `portable-data` beside the script/EXE. Existing `ArtlistScraper` config, vault, database, and backups are copied forward only in profile mode without deleting or overwriting legacy data. The Archive tab shows the active config mode and paths.
 
 ---
 

@@ -2,6 +2,11 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.7.24] - 2026-06-30
+
+- Added: Portable mode via `--portable`, `STOCK_VIDEO_COLLECTOR_PORTABLE=1`, or an app-adjacent `portable.flag` sentinel, storing config, database, thumbnails, and default output under `portable-data`.
+- Added: Config diagnostics in the GUI showing active mode, trigger, config path, output path, and portable sentinel path.
+
 ## [v0.7.23] - 2026-06-30
 
 - Added: Embedded provenance extraction from ffprobe format/stream tags for local imports, including title, creator, rights, license URL, terms URL, attribution text, source, and raw tag JSON.
