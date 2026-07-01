@@ -164,5 +164,68 @@ class PreviewMarketplaceProfileTests(unittest.TestCase):
         self.assertIn("Preview", _kw(profile, "catalog_card_js"))
 
 
+class RoyaltyFreeTargetProfileTests(unittest.TestCase):
+    def test_coverr_profile_covers_slugged_video_pages(self):
+        profile = _profile("Coverr")
+
+        self.assertEqual(_kw(profile, "start_url"), "https://coverr.co/videos")
+        self.assertEqual(
+            profile.extract_clip_id("https://coverr.co/videos/a-road-through-the-hills"),
+            "a-road-through-the-hills",
+        )
+        self.assertTrue(
+            profile.accepts_video_url(
+                "https://cdn.coverr.co/videos/coverr-a-road-through-the-hills-1080p.mp4"
+            )
+        )
+        self.assertFalse(profile.accepts_video_url("https://www.istockphoto.com/video/sample.mp4"))
+
+    def test_mixkit_profile_covers_numeric_clip_pages(self):
+        profile = _profile("Mixkit")
+        url = "https://mixkit.co/free-stock-video/going-down-a-curved-highway-through-a-mountain-range-41576/"
+
+        self.assertEqual(_kw(profile, "start_url"), "https://mixkit.co/free-stock-video/")
+        self.assertTrue(profile.is_item(url))
+        self.assertEqual(profile.extract_clip_id(url), "41576")
+        self.assertTrue(
+            profile.accepts_video_url(
+                "https://assets.mixkit.co/videos/preview/mixkit-curved-highway-41576-large.mp4"
+            )
+        )
+
+    def test_videezy_profile_covers_category_id_pages(self):
+        profile = _profile("Videezy")
+        url = "https://www.videezy.com/abstract/56876-rorschach-test-ink-blots-dinosaur"
+
+        self.assertEqual(_kw(profile, "start_url"), "https://www.videezy.com/newest")
+        self.assertTrue(profile.is_item(url))
+        self.assertEqual(profile.extract_clip_id(url), "56876")
+        self.assertTrue(
+            profile.accepts_video_url(
+                "https://static.videezy.com/system/resources/previews/000/056/876/original/sample.mp4"
+            )
+        )
+
+    def test_legacy_mazwai_and_videvo_profiles_follow_magnific_redirects(self):
+        item = (
+            "https://www.magnific.com/free-video/group-gen-z-friends-looking-mobile-phone-with-motion-graphics-"
+            "emojis-showing-multiple-social-media-notifications-liking-reacting-online-content_3445332"
+        )
+
+        mazwai = _profile("Mazwai")
+        self.assertEqual(_kw(mazwai, "start_url"), "https://www.magnific.com/videos")
+        self.assertIsNotNone(mazwai.normalize_url("https://mazwai.com/stock-video-footage"))
+        self.assertTrue(mazwai.is_catalog("https://mazwai.com/stock-video-footage"))
+        self.assertTrue(mazwai.is_item(item))
+        self.assertEqual(mazwai.extract_clip_id(item), "3445332")
+
+        videvo = _profile("Videvo")
+        self.assertEqual(_kw(videvo, "start_url"), "https://www.magnific.com/videos")
+        self.assertIsNotNone(videvo.normalize_url("https://www.videvo.net/stock-video-footage/"))
+        self.assertTrue(videvo.is_catalog("https://www.videvo.net/stock-video-footage/"))
+        self.assertTrue(videvo.is_item(item))
+        self.assertEqual(videvo.extract_clip_id(item), "3445332")
+
+
 if __name__ == "__main__":
     unittest.main()

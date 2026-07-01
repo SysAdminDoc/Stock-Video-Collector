@@ -1,6 +1,6 @@
 # Stock Video Collector
 
-![Version](https://img.shields.io/badge/version-0.7.26-blue)
+![Version](https://img.shields.io/badge/version-0.7.27-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white)
 ![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?logo=qt&logoColor=white)
 ![Playwright](https://img.shields.io/badge/Playwright-Headless_Browser-2EAD33?logo=playwright&logoColor=white)
@@ -71,6 +71,11 @@ Release verification checks the app version surfaces, exact `requirements-lock.t
 | **Motion Array** | MP4/WebM/HLS/DASH previews | OpenGraph, JSON-LD, product cards, preview metadata | Stock-video grids + infinite scroll |
 | **Vimeo** | HLS, MP4, WebM, DASH previews | OpenGraph, JSON-LD, channel/card metadata | Channel/group/showcase grids + infinite scroll |
 | **YouTube CC-BY** | Metadata-only YouTube Creative Commons ingest via `yt-dlp` | Title, uploader, channel/playlist, duration, resolution, tags, license/attribution | Browser-free URL/playlist/channel ingest |
+| **Coverr** | MP4/WebM/HLS/MOV royalty-free previews | OpenGraph, JSON-LD, slug IDs, license defaults | Video categories, collections, scenes |
+| **Mazwai** | MP4/MOV/WebM/HLS via current Magnific/Freepik redirect | Free video license defaults, numeric IDs, attribution state | Legacy Mazwai URL + Magnific video catalog |
+| **Videvo** | MP4/MOV/WebM/HLS via current Magnific/Freepik redirect | Free video license defaults, numeric IDs, attribution state | Legacy Videvo URL + Magnific video catalog |
+| **Mixkit** | MP4/WebM/HLS/MOV free stock video | Item duration, frame rate, tags, license defaults | Free-stock-video categories |
+| **Videezy** | MP4/WebM/MOV/HLS free stock footage | Category/id pages, tag metadata, per-item license defaults | Newest/popular/category grids |
 | **Pexels** | MP4 direct (SD/HD/UHD via Canva CDN) | OpenGraph + JSON-LD, URL slug titles | Load More button (up to 15 clicks) |
 | **Pixabay** | MP4, WebM | OpenGraph + JSON-LD | Infinite scroll |
 | **Storyblocks** | M3U8, MP4, WebM | OpenGraph + JSON-LD | Infinite scroll |
@@ -198,7 +203,7 @@ The crawler uses four complementary strategies to find video URLs on every page:
 
 ### Basic Workflow
 
-1. **Select a site profile** — check one or more profiles in the Crawl tab (Artlist, Pexels, Pixabay, Storyblocks, YouTube CC-BY, or Generic)
+1. **Select a site profile** — check one or more profiles in the Crawl tab (Artlist, Pexels, Pixabay, Storyblocks, YouTube CC-BY, Coverr, Mazwai, Videvo, Mixkit, Videezy, or Generic)
 2. **Set the start URL** — auto-populated per profile, or paste any URL for Generic mode
 3. **Configure crawl settings** — batch size, depth, delays, headless mode
 4. **Start crawling** — the crawler discovers pages, extracts metadata, and intercepts video URLs
