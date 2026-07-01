@@ -1,6 +1,6 @@
 # Stock Video Collector
 
-![Version](https://img.shields.io/badge/version-0.7.27-blue)
+![Version](https://img.shields.io/badge/version-0.7.28-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white)
 ![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?logo=qt&logoColor=white)
 ![Playwright](https://img.shields.io/badge/Playwright-Headless_Browser-2EAD33?logo=playwright&logoColor=white)
@@ -76,6 +76,7 @@ Release verification checks the app version surfaces, exact `requirements-lock.t
 | **Videvo** | MP4/MOV/WebM/HLS via current Magnific/Freepik redirect | Free video license defaults, numeric IDs, attribution state | Legacy Videvo URL + Magnific video catalog |
 | **Mixkit** | MP4/WebM/HLS/MOV free stock video | Item duration, frame rate, tags, license defaults | Free-stock-video categories |
 | **Videezy** | MP4/WebM/MOV/HLS free stock footage | Category/id pages, tag metadata, per-item license defaults | Newest/popular/category grids |
+| **RSS/Atom Feed** | MP4/WebM/MOV/HLS/DASH video enclosures | Feed title, entry title/link, author, categories, media thumbnail, license URL | Browser-free feed URL ingest |
 | **Pexels** | MP4 direct (SD/HD/UHD via Canva CDN) | OpenGraph + JSON-LD, URL slug titles | Load More button (up to 15 clicks) |
 | **Pixabay** | MP4, WebM | OpenGraph + JSON-LD | Infinite scroll |
 | **Storyblocks** | M3U8, MP4, WebM | OpenGraph + JSON-LD | Infinite scroll |
@@ -96,6 +97,7 @@ The **Generic** profile works on any site — it intercepts all video network re
 | Secret-safe config | API keys, auth headers, cookies, and proxy credentials are stored through the OS keyring when available, with encrypted local fallback |
 | Official API connectors | Optional API-first crawling for Pexels, Pixabay, Vimeo, and Adobe Stock when keys/tokens are configured, with browser fallback |
 | yt-dlp ingest mode | Optional browser-free YouTube CC-BY metadata ingest for Creative Commons URLs, playlists, and search results |
+| RSS/Atom feed ingest | Browser-free XML feed ingest for feeds that expose video enclosures or media:content items |
 | Fetch safety policy | App-initiated HTTP(S) fetches block localhost, private/link-local networks, metadata services, ambiguous IP literals, and redirect-to-private targets |
 | App-data migration | Legacy `ArtlistScraper` config, vault, database, and backup files are copied into `StockVideoCollector` without overwriting current data |
 | Portable mode | `--portable`, `STOCK_VIDEO_COLLECTOR_PORTABLE=1`, or `portable.flag` stores config, database, thumbnails, and default output under the app directory |
@@ -203,7 +205,7 @@ The crawler uses four complementary strategies to find video URLs on every page:
 
 ### Basic Workflow
 
-1. **Select a site profile** — check one or more profiles in the Crawl tab (Artlist, Pexels, Pixabay, Storyblocks, YouTube CC-BY, Coverr, Mazwai, Videvo, Mixkit, Videezy, or Generic)
+1. **Select a site profile or feed mode** — check one or more profiles in the Crawl tab, or select RSS/Atom Feed mode and paste a feed URL with video enclosures
 2. **Set the start URL** — auto-populated per profile, or paste any URL for Generic mode
 3. **Configure crawl settings** — batch size, depth, delays, headless mode
 4. **Start crawling** — the crawler discovers pages, extracts metadata, and intercepts video URLs

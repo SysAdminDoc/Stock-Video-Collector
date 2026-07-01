@@ -75,13 +75,14 @@ import multiprocessing
 multiprocessing.freeze_support()
 
 from pathlib import Path
+import xml.etree.ElementTree as ET
 import sys, os, subprocess, traceback, re, random, shutil, base64, hashlib, hmac, ipaddress, socket
 import html as _html
 import secrets as _secrets
 
 APP_NAME = "Stock Video Collector"
 APP_PACKAGE_NAME = "Stock-Video-Collector"
-APP_VERSION = "0.7.27"
+APP_VERSION = "0.7.28"
 APP_WINDOW_TITLE = f"{APP_NAME}  v{APP_VERSION}"
 APP_CONFIG_DIR_NAME = "StockVideoCollector"
 LEGACY_APP_CONFIG_DIR_NAME = "ArtlistScraper"
@@ -7129,6 +7130,303 @@ class YtDlpIngestWorker(QThread):
             self.finished.emit()
 
 
+class FeedIngestWorker(QThread):
+    """Ingest RSS/Atom feeds with video enclosures without Playwright."""
+    log_signal    = pyqtSignal(str, str)
+    stats_signal  = pyqtSignal(dict)
+    clip_signal   = pyqtSignal(dict)
+    status_signal = pyqtSignal(str)
+    finished      = pyqtSignal()
+
+    VIDEO_EXTS = ('.m3u8', '.mp4', '.webm', '.mov', '.mpd')
+    VIDEO_MIME_MARKERS = ('video/', 'application/vnd.apple.mpegurl', 'application/x-mpegurl', 'mpegurl')
+    HEADERS = {
+        'User-Agent': f'{APP_PACKAGE_NAME}/{APP_VERSION}',
+        'Accept': 'application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.5',
+    }
+
+    def __init__(self, cfg, db):
+        super().__init__()
+        self.cfg = cfg or {}
+        self.db = db
+        self._stop = threading.Event()
+
+    def stop(self):
+        self._stop.set()
+
+    def log(self, msg, level='INFO'):
+        self.log_signal.emit(f"[{datetime.now().strftime('%H:%M:%S')}] [{level:5s}] {msg}", level)
+
+    @staticmethod
+    def _local_name(tag):
+        return str(tag or '').split('}', 1)[-1].lower()
+
+    @classmethod
+    def _children(cls, node, name):
+        wanted = str(name or '').lower()
+        return [child for child in list(node or []) if cls._local_name(child.tag) == wanted]
+
+    @classmethod
+    def _first_child(cls, node, *names):
+        wanted = {str(name).lower() for name in names}
+        for child in list(node or []):
+            if cls._local_name(child.tag) in wanted:
+                return child
+        return None
+
+    @classmethod
+    def _first_text(cls, node, *names):
+        child = cls._first_child(node, *names)
+        if child is None:
+            return ''
+        return cls._clean_text(''.join(child.itertext()))
+
+    @staticmethod
+    def _clean_text(value):
+        text = _html.unescape(str(value or ''))
+        text = re.sub(r'<[^>]+>', ' ', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
+
+    @classmethod
+    def _is_video_candidate(cls, url, mime=''):
+        lower_url = str(url or '').split('?', 1)[0].lower()
+        lower_mime = str(mime or '').lower()
+        return (
+            any(lower_url.endswith(ext) for ext in cls.VIDEO_EXTS)
+            or any(marker in lower_mime for marker in cls.VIDEO_MIME_MARKERS)
+        )
+
+    @classmethod
+    def _format_candidate_label(cls, url, mime=''):
+        lower_url = str(url or '').split('?', 1)[0].lower()
+        for ext in cls.VIDEO_EXTS:
+            if lower_url.endswith(ext):
+                return ext.lstrip('.').upper()
+        if mime:
+            return str(mime).split(';', 1)[0]
+        return 'VIDEO'
+
+    @classmethod
+    def _entry_link(cls, entry):
+        text_link = cls._first_text(entry, 'link')
+        if text_link:
+            return text_link
+        for link in cls._children(entry, 'link'):
+            rel = str(link.attrib.get('rel', '') or '').lower()
+            href = str(link.attrib.get('href', '') or '').strip()
+            if href and rel in ('', 'alternate'):
+                return href
+        return ''
+
+    @classmethod
+    def _entry_author(cls, entry):
+        direct = cls._first_text(entry, 'creator', 'credit', 'author')
+        if direct:
+            return direct
+        author = cls._first_child(entry, 'author')
+        if author is not None:
+            return cls._first_text(author, 'name') or cls._clean_text(''.join(author.itertext()))
+        for node in entry.iter():
+            if cls._local_name(node.tag) == 'credit':
+                text = cls._clean_text(''.join(node.itertext()))
+                if text:
+                    return text
+        return ''
+
+    @classmethod
+    def _entry_tags(cls, entry):
+        tags = []
+        for node in entry.iter():
+            local = cls._local_name(node.tag)
+            if local == 'category':
+                term = node.attrib.get('term') or node.attrib.get('label') or ''.join(node.itertext())
+                term = cls._clean_text(term)
+                if term:
+                    tags.append(term)
+            elif local == 'keywords':
+                text = cls._clean_text(''.join(node.itertext()))
+                for part in re.split(r'[,;]', text):
+                    part = cls._clean_text(part)
+                    if part:
+                        tags.append(part)
+        seen = []
+        for tag in tags:
+            if tag not in seen:
+                seen.append(tag)
+        return ', '.join(seen[:30])
+
+    @classmethod
+    def _entry_thumbnail(cls, entry):
+        for node in entry.iter():
+            local = cls._local_name(node.tag)
+            if local == 'thumbnail':
+                url = node.attrib.get('url') or node.attrib.get('href') or ''
+                if url:
+                    return str(url).strip()
+            if local == 'image':
+                url = node.attrib.get('href') or node.attrib.get('url') or ''.join(node.itertext())
+                if url:
+                    return cls._clean_text(url)
+        return ''
+
+    @classmethod
+    def _entry_license_url(cls, entry):
+        for node in entry.iter():
+            local = cls._local_name(node.tag)
+            if local == 'license':
+                text = node.attrib.get('href') or node.attrib.get('url') or ''.join(node.itertext())
+                text = cls._clean_text(text)
+                if text:
+                    return text
+            if local == 'link' and str(node.attrib.get('rel', '')).lower() == 'license':
+                href = str(node.attrib.get('href', '') or '').strip()
+                if href:
+                    return href
+        return ''
+
+    @classmethod
+    def _media_candidates(cls, entry):
+        candidates = []
+        seen = set()
+
+        def add(url, mime='', duration='', width='', height=''):
+            url = str(url or '').strip()
+            if not url or url in seen or not cls._is_video_candidate(url, mime):
+                return
+            seen.add(url)
+            candidates.append({
+                'url': url,
+                'mime': str(mime or '').strip(),
+                'duration': str(duration or '').strip(),
+                'width': str(width or '').strip(),
+                'height': str(height or '').strip(),
+            })
+
+        for node in entry.iter():
+            local = cls._local_name(node.tag)
+            if local == 'enclosure':
+                add(node.attrib.get('url'), node.attrib.get('type'), node.attrib.get('duration'))
+            elif local == 'link' and str(node.attrib.get('rel', '')).lower() == 'enclosure':
+                add(node.attrib.get('href'), node.attrib.get('type'), node.attrib.get('duration'))
+            elif local == 'content':
+                medium = str(node.attrib.get('medium', '') or '').lower()
+                url = node.attrib.get('url') or node.attrib.get('src')
+                mime = node.attrib.get('type') or ''
+                if url and (medium == 'video' or cls._is_video_candidate(url, mime)):
+                    add(url, mime, node.attrib.get('duration'), node.attrib.get('width'), node.attrib.get('height'))
+        link = cls._entry_link(entry)
+        if link:
+            add(link)
+        return candidates
+
+    @classmethod
+    def _feed_entries(cls, root):
+        local = cls._local_name(root.tag)
+        if local == 'feed':
+            return cls._children(root, 'entry'), cls._first_text(root, 'title')
+        channel = cls._first_child(root, 'channel')
+        if channel is not None:
+            return cls._children(channel, 'item'), cls._first_text(channel, 'title')
+        items = [node for node in root.iter() if cls._local_name(node.tag) in ('item', 'entry')]
+        return items, cls._first_text(root, 'title')
+
+    @classmethod
+    def _duration_from_value(cls, value):
+        text = str(value or '').strip()
+        if not text:
+            return ''
+        if re.match(r'^\d+(?:\.\d+)?$', text):
+            return _format_duration_seconds(text)
+        if re.match(r'^\d{1,2}:\d{2}(?::\d{2})?$', text):
+            return text
+        return ''
+
+    @classmethod
+    def _parse_feed_items(cls, payload, feed_url=''):
+        root = ET.fromstring(payload)
+        entries, feed_title = cls._feed_entries(root)
+        clips = []
+        for entry in entries:
+            title = cls._first_text(entry, 'title') or cls._first_text(entry, 'summary') or cls._first_text(entry, 'description')
+            link = cls._entry_link(entry) or feed_url
+            description = cls._first_text(entry, 'description', 'summary', 'subtitle')
+            creator = cls._entry_author(entry)
+            tags = cls._entry_tags(entry)
+            thumb = cls._entry_thumbnail(entry)
+            license_url = cls._entry_license_url(entry)
+            for media in cls._media_candidates(entry):
+                media_url = media['url']
+                width = media.get('width', '')
+                height = media.get('height', '')
+                clip_id = 'feed_' + hashlib.sha1(media_url.encode('utf-8')).hexdigest()[:16]
+                clips.append({
+                    'clip_id': clip_id,
+                    'source_url': link or media_url,
+                    'title': title or os.path.basename(urlparse(media_url).path) or clip_id,
+                    'creator': creator,
+                    'collection': feed_title,
+                    'resolution': f"{width}x{height}" if width and height else '',
+                    'duration': cls._duration_from_value(media.get('duration', '')),
+                    'frame_rate': '',
+                    'camera': '',
+                    'formats': cls._format_candidate_label(media_url, media.get('mime', '')),
+                    'tags': tags,
+                    'm3u8_url': media_url,
+                    'thumbnail_url': thumb,
+                    'source_site': 'RSS/Atom Feed',
+                    'license_name': 'Feed item license' if license_url else '',
+                    'license_url': license_url,
+                    'attribution_required': 'Per feed item' if license_url else '',
+                    'attribution_text': creator,
+                    'terms_url': '',
+                    'preview_status': 'Feed enclosure',
+                })
+                if description and not clips[-1].get('tags'):
+                    clips[-1]['tags'] = description[:200]
+        return clips
+
+    def run(self):
+        self.status_signal.emit("running")
+        import urllib.request
+        saved = 0
+        seen = 0
+        try:
+            url = str(self.cfg.get('start_url') or '').strip()
+            if not url:
+                self.log("No RSS/Atom feed URL configured.", "ERROR")
+                return
+            limit = int(self.cfg.get('max_pages') or self.cfg.get('batch_size') or 100)
+            limit = max(1, min(limit, 1000))
+            req = urllib.request.Request(url, headers=dict(self.HEADERS))
+            self.log(f"Fetching RSS/Atom feed ({limit} item limit): {url}", "INFO")
+            with _safe_urlopen(req, timeout=20) as resp:
+                payload = resp.read(8_000_000)
+            for clip in self._parse_feed_items(payload, url)[:limit]:
+                if self._stop.is_set():
+                    break
+                seen += 1
+                is_new = self.db.save_clip(clip)
+                if not is_new:
+                    self.db.update_metadata(clip['clip_id'], clip)
+                else:
+                    saved += 1
+                self.clip_signal.emit(clip)
+                if seen % 25 == 0:
+                    self.stats_signal.emit(self.db.stats())
+            self.log(f"RSS/Atom ingest complete: {seen} video enclosure(s), {saved} new", "OK")
+            self.stats_signal.emit(self.db.stats())
+        except UnsafeUrlError as e:
+            self.log(f"RSS/Atom feed URL blocked: {e}", "ERROR")
+        except ET.ParseError as e:
+            self.log(f"RSS/Atom feed parse failed: {_redact_text(e)}", "ERROR")
+        except Exception as e:
+            self.log(f"RSS/Atom ingest failed: {_redact_text(e)}", "ERROR")
+        finally:
+            self.status_signal.emit("stopped")
+            self.finished.emit()
+
+
 class ThumbnailWorker(QThread):
     """
     Extracts/fetches thumbnails for clips in background.
@@ -8733,7 +9031,7 @@ class MainWindow(QMainWindow):
             'chk_resume': ("Resume mode", "Skip pages already marked crawled"),
             'chk_crawl_trace': ("Save failed-crawl diagnostics", "Save redacted trace bundles when browser crawls fail"),
             'inp_output': ("Output directory", "Base folder for exports, thumbnails, and default downloads"),
-            'combo_crawl_mode': ("Crawl mode", "Chooses full crawl, catalog sweep, M3U8 harvest, API discovery, or direct HTTP"),
+            'combo_crawl_mode': ("Crawl mode", "Chooses full crawl, catalog sweep, M3U8 harvest, API discovery, direct HTTP, yt-dlp, or RSS/Atom feed ingest"),
             'progress_bar': ("Crawl progress", "Shows active crawl progress while indeterminate or running"),
             'browser_banner': ("Browser readiness warning", "Shows when Chromium is missing for browser-required modes"),
             'lbl_browser_status': ("Browser status message", "Explains the current Chromium setup state"),
@@ -9019,6 +9317,7 @@ class MainWindow(QMainWindow):
         self.combo_crawl_mode.addItem("API Discovery  (find endpoints)", "api_discover")
         self.combo_crawl_mode.addItem("Direct HTTP  (no browser, fastest)", "direct_http")
         self.combo_crawl_mode.addItem("yt-dlp Ingest  (YouTube CC-BY)", "yt_dlp")
+        self.combo_crawl_mode.addItem("RSS/Atom Feed  (video enclosures)", "feed")
         self.combo_crawl_mode.setToolTip(
             "Full Crawl: visits every clip page for complete data + M3U8 streams.\n"
             "Catalog Sweep: only browses listing pages — bulk-extracts from card grids.\n"
@@ -9029,6 +9328,7 @@ class MainWindow(QMainWindow):
         self.combo_crawl_mode.setToolTip(
             self.combo_crawl_mode.toolTip()
             + "\nyt-dlp Ingest: browser-free YouTube CC-BY metadata ingest when yt-dlp is installed."
+            + "\nRSS/Atom Feed: browser-free ingest of video enclosure feeds."
         )
         mode_row.addWidget(self.combo_crawl_mode)
         mode_row.addStretch()
@@ -10681,7 +10981,7 @@ class MainWindow(QMainWindow):
         return 'full'
 
     def _crawl_mode_requires_browser(self, mode=None):
-        return (mode or self._current_crawl_mode()) not in ('direct_http', 'yt_dlp')
+        return (mode or self._current_crawl_mode()) not in ('direct_http', 'yt_dlp', 'feed')
 
     def _check_browser_status(self):
         """Show/hide browser warning banner based on whether the selected mode needs Chromium."""
@@ -10698,6 +10998,8 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage("Direct HTTP mode ready; Chromium not required.", 8000)
         elif mode == 'yt_dlp':
             self.status_bar.showMessage("yt-dlp ingest mode ready; Chromium not required.", 8000)
+        elif mode == 'feed':
+            self.status_bar.showMessage("RSS/Atom feed mode ready; Chromium not required.", 8000)
         else:
             self.status_bar.showMessage(
                 "Chromium not found. Click 'Install Browser' on the Crawl tab.", 8000)
@@ -10763,6 +11065,23 @@ class MainWindow(QMainWindow):
             mode_label = 'yt-dlp Ingest'
             self._on_log(f"Starting {mode_label} - no browser needed", "INFO")
             self.worker = YtDlpIngestWorker(cfg, self.db)
+            self.worker.log_signal.connect(self._on_log)
+            self.worker.stats_signal.connect(self._on_stats)
+            self.worker.clip_signal.connect(self._on_clip_found)
+            self.worker.status_signal.connect(self._on_status)
+            self.worker.finished.connect(self._on_finished)
+            self.worker.start()
+            self.btn_start.setEnabled(False)
+            self.btn_pause.setEnabled(False)
+            self.btn_stop.setEnabled(True)
+            self.progress_bar.setVisible(True)
+            self.tabs.setCurrentIndex(1)
+            return
+
+        if mode == 'feed':
+            mode_label = 'RSS/Atom Feed'
+            self._on_log(f"Starting {mode_label} - no browser needed", "INFO")
+            self.worker = FeedIngestWorker(cfg, self.db)
             self.worker.log_signal.connect(self._on_log)
             self.worker.stats_signal.connect(self._on_stats)
             self.worker.clip_signal.connect(self._on_clip_found)

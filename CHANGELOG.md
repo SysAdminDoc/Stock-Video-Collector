@@ -2,6 +2,11 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.7.28] - 2026-07-01
+
+- Added: Browser-free RSS/Atom feed ingest mode for video enclosures and `media:content` entries, using the shared unsafe-URL protection before fetching feeds.
+- Added: Feed parser tests for RSS, Atom, media thumbnails, license URLs, categories, duration/resolution mapping, and non-video item filtering.
+
 ## [v0.7.27] - 2026-07-01
 
 - Added: Royalty-free site profiles for Coverr, Mazwai, Videvo, Mixkit, and Videezy, including current Mazwai/Videvo redirects into the Magnific/Freepik video catalog.

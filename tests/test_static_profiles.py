@@ -34,6 +34,7 @@ class CrawlModeAvailabilityTests(unittest.TestCase):
 
         self.assertFalse(app.MainWindow._crawl_mode_requires_browser(object(), "direct_http"))
         self.assertFalse(app.MainWindow._crawl_mode_requires_browser(object(), "yt_dlp"))
+        self.assertFalse(app.MainWindow._crawl_mode_requires_browser(object(), "feed"))
         self.assertTrue(app.MainWindow._crawl_mode_requires_browser(object(), "full"))
         self.assertTrue(app.MainWindow._crawl_mode_requires_browser(object(), "api_discover"))
 
@@ -48,8 +49,10 @@ class CrawlModeAvailabilityTests(unittest.TestCase):
 
         self.assertLess(direct_idx, chromium_idx)
         self.assertLess(body.index("if mode == 'yt_dlp':"), chromium_idx)
+        self.assertLess(body.index("if mode == 'feed':"), chromium_idx)
         self.assertIn("Direct HTTP mode ready; Chromium not required.", source)
         self.assertIn("yt-dlp ingest mode ready; Chromium not required.", source)
+        self.assertIn("RSS/Atom feed mode ready; Chromium not required.", source)
         self.assertIn("ready or not requires_browser", source)
 
 
