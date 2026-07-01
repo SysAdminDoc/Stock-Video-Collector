@@ -82,7 +82,7 @@ import secrets as _secrets
 
 APP_NAME = "Stock Video Collector"
 APP_PACKAGE_NAME = "Stock-Video-Collector"
-APP_VERSION = "0.7.29"
+APP_VERSION = "0.7.30"
 APP_WINDOW_TITLE = f"{APP_NAME}  v{APP_VERSION}"
 APP_CONFIG_DIR_NAME = "StockVideoCollector"
 LEGACY_APP_CONFIG_DIR_NAME = "ArtlistScraper"
@@ -527,13 +527,28 @@ def _proxy_for_log(proxy):
     return _redact_text(server)
 
 
-def _select_proxy_from_pool(cfg, session_key=''):
+def _proxy_selection_key(cfg, session_key='', purpose=''):
+    base = str(session_key or random.random())
+    if _cfg_bool(cfg, 'residential_proxy_sticky', False):
+        return base
+    if purpose:
+        return f'{base}|{purpose}'
+    return base
+
+
+def _proxy_log_prefix(cfg):
+    if _cfg_bool(cfg, 'residential_proxy_sticky', False):
+        return 'Proxy pool sticky session'
+    return 'Proxy pool'
+
+
+def _select_proxy_from_pool(cfg, session_key='', purpose=''):
     if not _cfg_bool(cfg, 'proxy_pool_enabled', False):
         return None, 0
     proxies = _load_proxy_pool((cfg or {}).get('proxy_pool_path') or _default_proxy_pool_path())
     if not proxies:
         return None, 0
-    key = str(session_key or random.random()).encode('utf-8')
+    key = _proxy_selection_key(cfg, session_key, purpose).encode('utf-8')
     idx = int(hashlib.sha1(key).hexdigest(), 16) % len(proxies)
     return dict(proxies[idx]), len(proxies)
 
@@ -3741,9 +3756,9 @@ class CrawlerWorker(QThread):
         else:
             self.log(f"Browser profile: {profile_dir}", "INFO")
 
-        proxy, proxy_count = _select_proxy_from_pool(self.cfg, self._browser_session_key)
+        proxy, proxy_count = _select_proxy_from_pool(self.cfg, self._browser_session_key, 'crawl')
         if proxy:
-            self.log(f"Proxy pool: selected {_proxy_for_log(proxy)} from {proxy_count} entries", "INFO")
+            self.log(f"{_proxy_log_prefix(self.cfg)}: selected {_proxy_for_log(proxy)} from {proxy_count} entries", "INFO")
         elif _cfg_bool(self.cfg, 'proxy_pool_enabled', False):
             self.log("Proxy pool enabled but no valid proxies were loaded.", "WARN")
 
@@ -5320,9 +5335,9 @@ class DirectScrapeWorker(QThread):
 
         self.log("=== API DISCOVERY MODE ===", "OK")
         self.log("Launching browser to capture Artlist's internal API endpoints...", "INFO")
-        proxy, proxy_count = _select_proxy_from_pool(self.cfg, self._browser_session_key)
+        proxy, proxy_count = _select_proxy_from_pool(self.cfg, self._browser_session_key, 'api_discovery')
         if proxy:
-            self.log(f"Proxy pool: selected {_proxy_for_log(proxy)} from {proxy_count} entries", "INFO")
+            self.log(f"{_proxy_log_prefix(self.cfg)}: selected {_proxy_for_log(proxy)} from {proxy_count} entries", "INFO")
         elif _cfg_bool(self.cfg, 'proxy_pool_enabled', False):
             self.log("Proxy pool enabled but no valid proxies were loaded.", "WARN")
 
@@ -5796,9 +5811,9 @@ class DirectScrapeWorker(QThread):
                 self.log("  Chromium not installed — skipping bootstrap.", "WARN")
                 self.log("  Install browser, then re-run; or use 'API Discovery' mode first.", "WARN")
                 return '', api_urls, clips
-            proxy, proxy_count = _select_proxy_from_pool(self.cfg, self._browser_session_key + '|bootstrap')
+            proxy, proxy_count = _select_proxy_from_pool(self.cfg, self._browser_session_key, 'bootstrap')
             if proxy:
-                self.log(f"  Proxy pool: selected {_proxy_for_log(proxy)} from {proxy_count} entries", "INFO")
+                self.log(f"  {_proxy_log_prefix(self.cfg)}: selected {_proxy_for_log(proxy)} from {proxy_count} entries", "INFO")
             elif _cfg_bool(self.cfg, 'proxy_pool_enabled', False):
                 self.log("  Proxy pool enabled but no valid proxies were loaded.", "WARN")
             launch_kwargs = {'headless': True}
@@ -9177,6 +9192,7 @@ class MainWindow(QMainWindow):
             'chk_rotate_browser_profiles': ("Rotate browser profile slots", "Rotates Playwright persistent profile directories between crawl sessions"),
             'spin_browser_profile_slots': ("Browser profile slot count", "Number of persistent browser profile slots available for rotation"),
             'chk_proxy_pool': ("Use proxy pool", "Routes Playwright browser launches through one proxy from the configured proxy pool"),
+            'chk_residential_proxy_sticky': ("Residential sticky proxy session", "Keeps browser, API discovery, and bootstrap launches on one selected proxy for the crawl session"),
             'inp_proxy_pool_path': ("Proxy pool file", "Path to a proxies.txt file with one proxy per line"),
             'inp_output': ("Output directory", "Base folder for exports, thumbnails, and default downloads"),
             'combo_crawl_mode': ("Crawl mode", "Chooses full crawl, catalog sweep, M3U8 harvest, API discovery, direct HTTP, yt-dlp, or RSS/Atom feed ingest"),
@@ -9276,7 +9292,7 @@ class MainWindow(QMainWindow):
     def _apply_focus_order(self):
         order = [
             'inp_url', 'combo_crawl_mode', 'btn_start', 'btn_pause', 'btn_stop',
-            'chk_rotate_browser_profiles', 'spin_browser_profile_slots', 'chk_proxy_pool', 'inp_proxy_pool_path',
+            'chk_rotate_browser_profiles', 'spin_browser_profile_slots', 'chk_proxy_pool', 'chk_residential_proxy_sticky', 'inp_proxy_pool_path',
             'inp_search', 'combo_sort', 'combo_duration', 'combo_user_collection',
             'btn_catalog', 'btn_select_visible', 'btn_clear_selection',
             'btn_backup_catalog', 'btn_backup_refresh', 'btn_backup_restore_selected',
@@ -9431,6 +9447,9 @@ class MainWindow(QMainWindow):
         self.chk_proxy_pool = QCheckBox("Use proxy pool")
         self.chk_proxy_pool.setToolTip("Load one proxy per line from proxies.txt; supports http, https, socks4, and socks5 URLs.")
         row_proxy.addWidget(self.chk_proxy_pool)
+        self.chk_residential_proxy_sticky = QCheckBox("Residential/sticky session")
+        self.chk_residential_proxy_sticky.setToolTip("Keep one selected proxy for crawl, API discovery, and bootstrap launches in the same worker session.")
+        row_proxy.addWidget(self.chk_residential_proxy_sticky)
         self.inp_proxy_pool_path = QLineEdit(_default_proxy_pool_path())
         self.inp_proxy_pool_path.setPlaceholderText("Path to proxies.txt")
         row_proxy.addWidget(self.inp_proxy_pool_path, 1)
@@ -9440,7 +9459,7 @@ class MainWindow(QMainWindow):
         btn_proxy.clicked.connect(self._browse_proxy_pool)
         row_proxy.addWidget(btn_proxy)
         gp2.addLayout(row_proxy)
-        gp2.addWidget(self._sub("Proxy lines may be host:port, http://user:pass@host:port, or socks5://host:port. Credentials are never logged."))
+        gp2.addWidget(self._sub("Proxy lines may be host:port, http://user:pass@host:port, or socks5://host:port. Sticky mode keeps one selected proxy across Playwright launches in the same run. Credentials are never logged."))
         lay.addWidget(grp_proxy)
 
         # Output dir
@@ -11149,6 +11168,7 @@ class MainWindow(QMainWindow):
             cfg['browser_profile_slots'] = self.spin_browser_profile_slots.value()
         if hasattr(self, 'chk_proxy_pool'):
             cfg['proxy_pool_enabled'] = self.chk_proxy_pool.isChecked()
+            cfg['residential_proxy_sticky'] = getattr(self, 'chk_residential_proxy_sticky', None).isChecked() if hasattr(self, 'chk_residential_proxy_sticky') else False
             cfg['proxy_pool_path'] = self.inp_proxy_pool_path.text().strip()
         return cfg
 
@@ -12363,6 +12383,8 @@ class MainWindow(QMainWindow):
                 self.spin_browser_profile_slots.setValue(_bounded_int(cfg.get('browser_profile_slots'), 4, 1, 50))
         if hasattr(self, 'chk_proxy_pool'):
             self.chk_proxy_pool.setChecked(_cfg_bool(cfg, 'proxy_pool_enabled', False))
+            if hasattr(self, 'chk_residential_proxy_sticky'):
+                self.chk_residential_proxy_sticky.setChecked(_cfg_bool(cfg, 'residential_proxy_sticky', False))
             self.inp_proxy_pool_path.setText(str(cfg.get('proxy_pool_path') or _default_proxy_pool_path()))
         # Clipboard monitor (opt-in)
         if cfg.get('clipboard_monitor', False) and hasattr(self, '_clipboard_timer'):

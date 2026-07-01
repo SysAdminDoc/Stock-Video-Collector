@@ -49,6 +49,24 @@ class BrowserRotationProxyTests(unittest.TestCase):
             self.assertEqual(first, second)
             self.assertNotIn("plain-secret", app._proxy_for_log(first))
 
+    def test_residential_sticky_proxy_ignores_browser_launch_purpose(self):
+        cfg = {"proxy_pool_enabled": True, "residential_proxy_sticky": True}
+
+        self.assertEqual(
+            app._proxy_selection_key(cfg, "run-42", "crawl"),
+            app._proxy_selection_key(cfg, "run-42", "bootstrap"),
+        )
+        self.assertEqual(app._proxy_log_prefix(cfg), "Proxy pool sticky session")
+
+    def test_non_sticky_proxy_selection_includes_browser_launch_purpose(self):
+        cfg = {"proxy_pool_enabled": True, "residential_proxy_sticky": False}
+
+        self.assertNotEqual(
+            app._proxy_selection_key(cfg, "run-42", "crawl"),
+            app._proxy_selection_key(cfg, "run-42", "bootstrap"),
+        )
+        self.assertEqual(app._proxy_log_prefix(cfg), "Proxy pool")
+
     def test_browser_profile_context_defaults_to_legacy_profile(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(app, "get_config_dir", return_value=tmp):
             context = app._browser_profile_context({}, "session")

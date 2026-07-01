@@ -2,6 +2,11 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.7.30] - 2026-07-01
+
+- Added: Residential/sticky proxy session mode so crawl, API discovery, and Direct HTTP browser bootstrap launches use the same selected proxy for a worker session.
+- Added: Configure-tab persistence and tests for sticky proxy selection semantics and logging labels.
+
 ## [v0.7.29] - 2026-07-01
 
 - Added: Optional Playwright persistent-context rotation across `browser_profiles/slot-N` directories.

@@ -1,6 +1,6 @@
 # Stock Video Collector
 
-![Version](https://img.shields.io/badge/version-0.7.29-blue)
+![Version](https://img.shields.io/badge/version-0.7.30-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white)
 ![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?logo=qt&logoColor=white)
 ![Playwright](https://img.shields.io/badge/Playwright-Headless_Browser-2EAD33?logo=playwright&logoColor=white)
@@ -94,6 +94,7 @@ The **Generic** profile works on any site — it intercepts all video network re
 | Persistent profile | Browser session cookies, localStorage, and tokens persist across runs |
 | Profile slot rotation | Optional `browser_profiles/slot-N` rotation for Playwright persistent contexts |
 | Proxy pool | Optional `proxies.txt` support for Playwright browser launches; supports `host:port`, HTTP(S), SOCKS4, and SOCKS5 entries |
+| Residential sticky proxy session | Optional sticky mode keeps crawl, API discovery, and bootstrap browser launches on one selected proxy for the worker session |
 | Request interception | Blocks heavy HLS `.ts` segments during crawl to save bandwidth |
 | Configurable delays | Page delay, scroll delay, M3U8 wait, timeout — all adjustable per-run |
 | Secret-safe config | API keys, auth headers, cookies, and proxy credentials are stored through the OS keyring when available, with encrypted local fallback |
@@ -231,6 +232,7 @@ All settings persist automatically in a JSON config file. Key options:
 | Headless | On | Run browser without visible window |
 | Rotate browser profiles / slots | Off / 4 | Use separate persistent browser-profile directories between crawl sessions |
 | Proxy pool / path | Off / app-data `proxies.txt` | Route Playwright browser launches through one proxy entry from a user-supplied proxy file |
+| Residential sticky proxy session | Off | Keep crawl, API discovery, and bootstrap browser launches on one selected proxy during the same worker session |
 | Use official APIs | On | Use configured official API connectors before browser crawling |
 | API search query | Blank | Optional query for API-backed Pexels/Pixabay/Vimeo/Adobe Stock searches |
 | API pages / per page | 3 / 40 | Quota-aware pagination limits for official API connector crawls |
