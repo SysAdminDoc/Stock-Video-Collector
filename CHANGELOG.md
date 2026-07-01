@@ -2,6 +2,11 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.7.20] - 2026-06-30
+
+- Added: Pinned `requirements-lock.txt` release environment with `pip-audit` as a local release-time dependency.
+- Changed: Release verification now fails on dependency lock drift or vulnerability audit findings and writes local dependency snapshot/audit JSON.
+
 ## [v0.7.19] - 2026-06-30
 
 - Added: Exact SHA-256 and optional ffmpeg visual-hash duplicate grouping for imported/downloaded clips.

@@ -1,6 +1,6 @@
 # Stock Video Collector
 
-![Version](https://img.shields.io/badge/version-0.7.19-blue)
+![Version](https://img.shields.io/badge/version-0.7.20-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white)
 ![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?logo=qt&logoColor=white)
 ![Playwright](https://img.shields.io/badge/Playwright-Headless_Browser-2EAD33?logo=playwright&logoColor=white)
@@ -35,8 +35,12 @@ The setup installs:
 
 ```bash
 .\.venv\Scripts\python -m pip install pyinstaller
+.\.venv\Scripts\python -m pip install --upgrade -r requirements-lock.txt
+.\.venv\Scripts\python tools\build_release.py --verify-only
 .\.venv\Scripts\python tools\build_release.py
 ```
+
+Release verification checks the app version surfaces, exact `requirements-lock.txt` pins, the active venv package set, and a local `pip-audit` vulnerability report before building.
 
 ---
 

@@ -10,6 +10,7 @@ APP = ROOT / "artlist_scraper.py"
 README = ROOT / "README.md"
 CHANGELOG = ROOT / "CHANGELOG.md"
 BUILD_SCRIPT = ROOT / "tools" / "build_release.py"
+LOCK_FILE = ROOT / "requirements-lock.txt"
 
 
 def _app_version():
@@ -45,6 +46,22 @@ class ReleaseHygieneTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(f"v{_app_version()}", result.stdout)
+        self.assertIn("dependency lock ok", result.stdout)
+        self.assertIn("dependency audit ok", result.stdout)
+
+    def test_release_lock_pins_core_tools(self):
+        lock = LOCK_FILE.read_text(encoding="utf-8").lower().replace("_", "-")
+        for package in [
+            "pip==",
+            "setuptools==",
+            "pyinstaller==",
+            "pip-audit==",
+            "pyqt6==",
+            "playwright==",
+            "imageio-ffmpeg==",
+            "keyring==",
+        ]:
+            self.assertIn(package, lock)
 
 
 if __name__ == "__main__":
