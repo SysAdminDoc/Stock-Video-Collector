@@ -2,6 +2,11 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.7.26] - 2026-06-30
+
+- Added: YouTube CC-BY site profile and browser-free `yt-dlp` ingest mode for Creative Commons metadata collections.
+- Added: Deterministic yt-dlp normalization tests for CC filtering, license/provenance fields, thumbnails, duration, command shape, and crawl-mode browser gating.
+
 ## [v0.7.25] - 2026-06-30
 
 - Added: Project handoff package export that writes a portable folder and ZIP with copied media, thumbnails, generated sidecars, `manifest.json`, `licenses/ATTRIBUTION.txt`, and `checksums.sha256`.

@@ -1,6 +1,6 @@
 # Stock Video Collector
 
-![Version](https://img.shields.io/badge/version-0.7.25-blue)
+![Version](https://img.shields.io/badge/version-0.7.26-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white)
 ![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?logo=qt&logoColor=white)
 ![Playwright](https://img.shields.io/badge/Playwright-Headless_Browser-2EAD33?logo=playwright&logoColor=white)
@@ -30,6 +30,12 @@ Portable mode keeps config, database, thumbnails, and default output beside the 
 ```
 
 Creating a `portable.flag` file beside the script or EXE enables the same mode without command-line arguments.
+
+YouTube Creative Commons ingest is optional and uses `yt-dlp` for metadata-only collection without a browser:
+
+```bash
+.\.venv\Scripts\python -m pip install yt-dlp
+```
 
 The setup installs:
 
@@ -64,6 +70,7 @@ Release verification checks the app version surfaces, exact `requirements-lock.t
 | **Envato Elements** | MP4/WebM/HLS/DASH previews | OpenGraph, JSON-LD, item cards, preview metadata | Stock-video grids + infinite scroll |
 | **Motion Array** | MP4/WebM/HLS/DASH previews | OpenGraph, JSON-LD, product cards, preview metadata | Stock-video grids + infinite scroll |
 | **Vimeo** | HLS, MP4, WebM, DASH previews | OpenGraph, JSON-LD, channel/card metadata | Channel/group/showcase grids + infinite scroll |
+| **YouTube CC-BY** | Metadata-only YouTube Creative Commons ingest via `yt-dlp` | Title, uploader, channel/playlist, duration, resolution, tags, license/attribution | Browser-free URL/playlist/channel ingest |
 | **Pexels** | MP4 direct (SD/HD/UHD via Canva CDN) | OpenGraph + JSON-LD, URL slug titles | Load More button (up to 15 clicks) |
 | **Pixabay** | MP4, WebM | OpenGraph + JSON-LD | Infinite scroll |
 | **Storyblocks** | M3U8, MP4, WebM | OpenGraph + JSON-LD | Infinite scroll |
@@ -83,6 +90,7 @@ The **Generic** profile works on any site — it intercepts all video network re
 | Configurable delays | Page delay, scroll delay, M3U8 wait, timeout — all adjustable per-run |
 | Secret-safe config | API keys, auth headers, cookies, and proxy credentials are stored through the OS keyring when available, with encrypted local fallback |
 | Official API connectors | Optional API-first crawling for Pexels, Pixabay, Vimeo, and Adobe Stock when keys/tokens are configured, with browser fallback |
+| yt-dlp ingest mode | Optional browser-free YouTube CC-BY metadata ingest for Creative Commons URLs, playlists, and search results |
 | Fetch safety policy | App-initiated HTTP(S) fetches block localhost, private/link-local networks, metadata services, ambiguous IP literals, and redirect-to-private targets |
 | App-data migration | Legacy `ArtlistScraper` config, vault, database, and backup files are copied into `StockVideoCollector` without overwriting current data |
 | Portable mode | `--portable`, `STOCK_VIDEO_COLLECTOR_PORTABLE=1`, or `portable.flag` stores config, database, thumbnails, and default output under the app directory |
@@ -190,7 +198,7 @@ The crawler uses four complementary strategies to find video URLs on every page:
 
 ### Basic Workflow
 
-1. **Select a site profile** — check one or more profiles in the Crawl tab (Artlist, Pexels, Pixabay, Storyblocks, or Generic)
+1. **Select a site profile** — check one or more profiles in the Crawl tab (Artlist, Pexels, Pixabay, Storyblocks, YouTube CC-BY, or Generic)
 2. **Set the start URL** — auto-populated per profile, or paste any URL for Generic mode
 3. **Configure crawl settings** — batch size, depth, delays, headless mode
 4. **Start crawling** — the crawler discovers pages, extracts metadata, and intercepts video URLs
@@ -267,6 +275,8 @@ Available variables: `{title}`, `{clip_id}`, `{creator}`, `{collection}`, `{reso
 ## Troubleshooting
 
 **"Chromium not found"** — Click the "Install Browser" button on the Crawl tab. This runs `playwright install chromium` automatically. Direct HTTP mode can still start without Chromium.
+
+**YouTube CC-BY ingest says `yt-dlp` is missing** — Install the optional CLI in the active environment with `.\.venv\Scripts\python -m pip install yt-dlp`, then select "yt-dlp Ingest" as the crawl mode.
 
 **Search results seem wrong or incomplete** — Click the "🔄 Rebuild Index" button on the Crawl tab to rebuild the FTS5 search index from scratch.
 

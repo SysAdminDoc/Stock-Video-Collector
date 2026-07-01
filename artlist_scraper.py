@@ -81,7 +81,7 @@ import secrets as _secrets
 
 APP_NAME = "Stock Video Collector"
 APP_PACKAGE_NAME = "Stock-Video-Collector"
-APP_VERSION = "0.7.25"
+APP_VERSION = "0.7.26"
 APP_WINDOW_TITLE = f"{APP_NAME}  v{APP_VERSION}"
 APP_CONFIG_DIR_NAME = "StockVideoCollector"
 LEGACY_APP_CONFIG_DIR_NAME = "ArtlistScraper"
@@ -6947,6 +6947,188 @@ class ClipCard(QFrame):
 # THUMBNAIL WORKER  — background extractor / fetcher
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _format_duration_seconds(seconds):
+    try:
+        total = int(float(seconds))
+    except Exception:
+        return ''
+    if total <= 0:
+        return ''
+    hours = total // 3600
+    minutes = (total % 3600) // 60
+    secs = total % 60
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+class YtDlpIngestWorker(QThread):
+    """Ingest YouTube Creative Commons metadata through yt-dlp without Playwright."""
+    log_signal    = pyqtSignal(str, str)
+    stats_signal  = pyqtSignal(dict)
+    clip_signal   = pyqtSignal(dict)
+    status_signal = pyqtSignal(str)
+    finished      = pyqtSignal()
+
+    CC_MARKERS = (
+        'creative commons',
+        'cc-by',
+        'cc by',
+        'attribution license',
+        'reuse allowed',
+    )
+
+    def __init__(self, cfg, db):
+        super().__init__()
+        self.cfg = cfg or {}
+        self.db = db
+        self._stop = threading.Event()
+        self._proc = None
+
+    def stop(self):
+        self._stop.set()
+        try:
+            if self._proc and self._proc.poll() is None:
+                self._proc.terminate()
+        except Exception:
+            pass
+
+    def log(self, msg, level='INFO'):
+        self.log_signal.emit(f"[{datetime.now().strftime('%H:%M:%S')}] [{level:5s}] {msg}", level)
+
+    @classmethod
+    def _is_cc_entry(cls, entry):
+        text = ' '.join(str(entry.get(k, '') or '') for k in ('license', 'license_url', 'availability'))
+        lowered = text.lower()
+        return any(marker in lowered for marker in cls.CC_MARKERS)
+
+    @classmethod
+    def _entry_to_clip(cls, entry):
+        if not isinstance(entry, dict) or not entry.get('id') or not cls._is_cc_entry(entry):
+            return None
+        video_id = str(entry.get('id') or '').strip()
+        webpage = (
+            entry.get('webpage_url')
+            or entry.get('original_url')
+            or f"https://www.youtube.com/watch?v={video_id}"
+        )
+        thumbs = entry.get('thumbnails') or []
+        thumb_url = ''
+        if thumbs:
+            try:
+                thumb_url = sorted(
+                    thumbs,
+                    key=lambda item: int(item.get('width') or 0) * int(item.get('height') or 0),
+                )[-1].get('url', '')
+            except Exception:
+                thumb_url = (thumbs[-1] or {}).get('url', '')
+        if not thumb_url:
+            thumb_url = entry.get('thumbnail') or ''
+        width = entry.get('width') or ''
+        height = entry.get('height') or ''
+        resolution = f"{width}x{height}" if width and height else str(entry.get('resolution') or '')
+        ext = str(entry.get('ext') or entry.get('vcodec') or '').upper()
+        return {
+            'clip_id': f"youtube_{video_id}",
+            'source_url': webpage,
+            'title': entry.get('title') or video_id,
+            'creator': entry.get('uploader') or entry.get('channel') or '',
+            'collection': entry.get('playlist_title') or entry.get('channel') or 'YouTube CC-BY',
+            'resolution': resolution,
+            'duration': _format_duration_seconds(entry.get('duration')),
+            'frame_rate': str(entry.get('fps') or ''),
+            'camera': '',
+            'formats': ext,
+            'tags': ', '.join(str(tag) for tag in (entry.get('tags') or [])[:20]),
+            'm3u8_url': '',
+            'thumbnail_url': thumb_url,
+            'source_site': 'YouTube CC-BY',
+            'license_name': entry.get('license') or 'Creative Commons Attribution license',
+            'license_url': entry.get('license_url') or 'https://support.google.com/youtube/answer/2797468',
+            'attribution_required': 'Yes',
+            'attribution_text': entry.get('uploader') or entry.get('channel') or '',
+            'terms_url': 'https://www.youtube.com/t/terms',
+            'preview_status': 'yt-dlp metadata ingest',
+        }
+
+    def _command(self, url, limit):
+        return [
+            shutil.which('yt-dlp') or shutil.which('yt-dlp.exe') or 'yt-dlp',
+            '--dump-json',
+            '--skip-download',
+            '--ignore-errors',
+            '--no-warnings',
+            '--playlist-end', str(limit),
+            url,
+        ]
+
+    def run(self):
+        self.status_signal.emit("running")
+        saved = 0
+        seen = 0
+        skipped = 0
+        try:
+            tool = shutil.which('yt-dlp') or shutil.which('yt-dlp.exe')
+            if not tool:
+                self.log("yt-dlp is not installed or not on PATH. Install yt-dlp to use YouTube CC-BY ingest.", "ERROR")
+                return
+            profile = SiteProfile.get('YouTube CC-BY')
+            url = str(self.cfg.get('start_url') or (profile.start_url if profile else '')).strip()
+            if not url:
+                self.log("No YouTube URL configured for yt-dlp ingest.", "ERROR")
+                return
+            limit = int(self.cfg.get('max_pages') or self.cfg.get('batch_size') or 50)
+            limit = max(1, min(limit, 500))
+            cmd = self._command(url, limit)
+            cmd[0] = tool
+            self.log(f"Starting yt-dlp ingest ({limit} item limit): {url}", "INFO")
+            self._proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+            )
+            assert self._proc.stdout is not None
+            for line in self._proc.stdout:
+                if self._stop.is_set():
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    skipped += 1
+                    continue
+                seen += 1
+                clip = self._entry_to_clip(entry)
+                if not clip:
+                    skipped += 1
+                    continue
+                is_new = self.db.save_clip(clip)
+                if not is_new:
+                    self.db.update_metadata(clip['clip_id'], clip)
+                self.clip_signal.emit(clip)
+                saved += 1 if is_new else 0
+                if seen % 10 == 0:
+                    self.stats_signal.emit(self.db.stats())
+            rc = self._proc.wait(timeout=10)
+            stderr = ''
+            if self._proc.stderr:
+                stderr = _redact_text(self._proc.stderr.read() or '').strip()
+            if rc not in (0, None) and stderr:
+                self.log(f"yt-dlp exited with {rc}: {stderr[:500]}", "WARN")
+            self.log(f"yt-dlp ingest complete: {seen} inspected, {saved} new, {skipped} skipped non-CC/malformed", "OK")
+            self.stats_signal.emit(self.db.stats())
+        except Exception as e:
+            self.log(f"yt-dlp ingest failed: {_redact_text(e)}", "ERROR")
+        finally:
+            self.status_signal.emit("stopped")
+            self.finished.emit()
+
+
 class ThumbnailWorker(QThread):
     """
     Extracts/fetches thumbnails for clips in background.
@@ -8836,6 +9018,7 @@ class MainWindow(QMainWindow):
         self.combo_crawl_mode.addItem("M3U8 Harvest  (enrich existing clips)", "m3u8_only")
         self.combo_crawl_mode.addItem("API Discovery  (find endpoints)", "api_discover")
         self.combo_crawl_mode.addItem("Direct HTTP  (no browser, fastest)", "direct_http")
+        self.combo_crawl_mode.addItem("yt-dlp Ingest  (YouTube CC-BY)", "yt_dlp")
         self.combo_crawl_mode.setToolTip(
             "Full Crawl: visits every clip page for complete data + M3U8 streams.\n"
             "Catalog Sweep: only browses listing pages — bulk-extracts from card grids.\n"
@@ -8843,6 +9026,10 @@ class MainWindow(QMainWindow):
             "API Discovery: one-time browser session to find Artlist's internal API endpoints.\n"
             "Direct HTTP: fastest — no browser at all. Uses sitemaps, __NEXT_DATA__,\n"
             "  _next/data endpoints, and clip ID probing for bulk metadata.")
+        self.combo_crawl_mode.setToolTip(
+            self.combo_crawl_mode.toolTip()
+            + "\nyt-dlp Ingest: browser-free YouTube CC-BY metadata ingest when yt-dlp is installed."
+        )
         mode_row.addWidget(self.combo_crawl_mode)
         mode_row.addStretch()
         lay.addLayout(mode_row)
@@ -10494,7 +10681,7 @@ class MainWindow(QMainWindow):
         return 'full'
 
     def _crawl_mode_requires_browser(self, mode=None):
-        return (mode or self._current_crawl_mode()) != 'direct_http'
+        return (mode or self._current_crawl_mode()) not in ('direct_http', 'yt_dlp')
 
     def _check_browser_status(self):
         """Show/hide browser warning banner based on whether the selected mode needs Chromium."""
@@ -10507,8 +10694,10 @@ class MainWindow(QMainWindow):
             self.btn_start.setEnabled(can_start)
         if ready and requires_browser:
             self.status_bar.showMessage("Browser ready.")
-        elif not requires_browser:
+        elif mode == 'direct_http':
             self.status_bar.showMessage("Direct HTTP mode ready; Chromium not required.", 8000)
+        elif mode == 'yt_dlp':
+            self.status_bar.showMessage("yt-dlp ingest mode ready; Chromium not required.", 8000)
         else:
             self.status_bar.showMessage(
                 "Chromium not found. Click 'Install Browser' on the Crawl tab.", 8000)
@@ -10565,6 +10754,23 @@ class MainWindow(QMainWindow):
             self.worker.start()
             self.btn_start.setEnabled(False)
             self.btn_pause.setEnabled(False)  # No pause for HTTP mode
+            self.btn_stop.setEnabled(True)
+            self.progress_bar.setVisible(True)
+            self.tabs.setCurrentIndex(1)
+            return
+
+        if mode == 'yt_dlp':
+            mode_label = 'yt-dlp Ingest'
+            self._on_log(f"Starting {mode_label} - no browser needed", "INFO")
+            self.worker = YtDlpIngestWorker(cfg, self.db)
+            self.worker.log_signal.connect(self._on_log)
+            self.worker.stats_signal.connect(self._on_stats)
+            self.worker.clip_signal.connect(self._on_clip_found)
+            self.worker.status_signal.connect(self._on_status)
+            self.worker.finished.connect(self._on_finished)
+            self.worker.start()
+            self.btn_start.setEnabled(False)
+            self.btn_pause.setEnabled(False)
             self.btn_stop.setEnabled(True)
             self.progress_bar.setVisible(True)
             self.tabs.setCurrentIndex(1)

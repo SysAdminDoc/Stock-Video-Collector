@@ -1,6 +1,6 @@
 """Built-in profile module registry."""
 
-from . import artlist, pexels, pixabay, storyblocks, adobe_stock, shutterstock, envato_elements, motion_array, vimeo, generic
+from . import artlist, pexels, pixabay, storyblocks, adobe_stock, shutterstock, envato_elements, motion_array, vimeo, youtube_cc, generic
 
 BUILTIN_MODULES = (
     artlist,
@@ -12,6 +12,7 @@ BUILTIN_MODULES = (
     envato_elements,
     motion_array,
     vimeo,
+    youtube_cc,
     generic,
 )
 

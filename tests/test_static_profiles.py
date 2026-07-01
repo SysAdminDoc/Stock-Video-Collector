@@ -29,10 +29,11 @@ class StaticSourceTests(unittest.TestCase):
 
 
 class CrawlModeAvailabilityTests(unittest.TestCase):
-    def test_direct_http_mode_does_not_require_browser(self):
+    def test_browser_free_modes_do_not_require_browser(self):
         import artlist_scraper as app
 
         self.assertFalse(app.MainWindow._crawl_mode_requires_browser(object(), "direct_http"))
+        self.assertFalse(app.MainWindow._crawl_mode_requires_browser(object(), "yt_dlp"))
         self.assertTrue(app.MainWindow._crawl_mode_requires_browser(object(), "full"))
         self.assertTrue(app.MainWindow._crawl_mode_requires_browser(object(), "api_discover"))
 
@@ -46,7 +47,9 @@ class CrawlModeAvailabilityTests(unittest.TestCase):
         chromium_idx = body.index("if not _chromium_is_ready():")
 
         self.assertLess(direct_idx, chromium_idx)
+        self.assertLess(body.index("if mode == 'yt_dlp':"), chromium_idx)
         self.assertIn("Direct HTTP mode ready; Chromium not required.", source)
+        self.assertIn("yt-dlp ingest mode ready; Chromium not required.", source)
         self.assertIn("ready or not requires_browser", source)
 
 
