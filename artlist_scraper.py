@@ -8840,6 +8840,14 @@ class DownloadWorker(QThread):
                 return
             if result == 'permanent':
                 break
+            if result == 'deferred':
+                self.progress_signal.emit(clip_id, 0, "Deferred (bandwidth schedule)")
+                self.log(f"[DL] Deferred [{clip_id}] — outside download window", "INFO")
+                with self._active_lock:
+                    self._queue_seq += 1
+                    seq = self._queue_seq
+                self._queue.put((self.PRIORITY_LOW, seq, dict(clip)))
+                return
 
         # ffmpeg failed — try yt-dlp fallback for source_url or m3u8_url
         ytdlp_result = self._try_ytdlp_download(clip, ffmpeg)
@@ -9040,18 +9048,9 @@ class DownloadWorker(QThread):
         m3u8_url     = str(clip.get('m3u8_url','') or '')
 
         # ── Bandwidth schedule check ──────────────────────────────────
-        allowed, _throttle = self._check_bw_schedule()
+        allowed, throttle_kbps = self._check_bw_schedule()
         if not allowed:
-            self.progress_signal.emit(clip_id, 0, "Waiting (bandwidth schedule)...")
-            for _ in range(60):
-                if self._stop.is_set():
-                    return 'transient'
-                _time.sleep(10)
-                allowed, _throttle = self._check_bw_schedule()
-                if allowed:
-                    break
-            if not allowed:
-                return 'transient'
+            return 'deferred'
 
         # ── Check if already downloaded ───────────────────────────────
         if clip_id:
@@ -9245,14 +9244,16 @@ class DownloadWorker(QThread):
             ffmpeg_duration = total_secs
             dl_start_time = _time.time()
             last_speed_update = dl_start_time
-            last_progress_time = dl_start_time  # watchdog: last time we saw progress
+            last_progress_time = dl_start_time
+            throttle_limit = throttle_kbps * 1024 if throttle_kbps > 0 else 0
+            last_throttle_size = 0
+            last_throttle_time = dl_start_time
 
             for line in proc.stderr:
                 if self._stop.is_set():
                     proc.terminate(); break
                 line = line.strip()
 
-                # Watchdog: kill if no progress output for _FFMPEG_PROCESS_TIMEOUT
                 now = _time.time()
                 if line:
                     last_progress_time = now
@@ -9260,6 +9261,21 @@ class DownloadWorker(QThread):
                     self.log(f"[DL] WATCHDOG: killing hung ffmpeg for [{clip_id}] (no output for {self._FFMPEG_PROCESS_TIMEOUT}s)", "ERROR")
                     proc.kill()
                     break
+
+                # Bandwidth throttle: pause if exceeding limit
+                if throttle_limit > 0 and os.path.exists(part_path):
+                    interval = now - last_throttle_time
+                    if interval >= 2.0:
+                        cur_size = os.path.getsize(part_path)
+                        bytes_delta = cur_size - last_throttle_size
+                        if bytes_delta > 0 and interval > 0:
+                            rate = bytes_delta / interval
+                            if rate > throttle_limit:
+                                pause = (bytes_delta / throttle_limit) - interval
+                                if pause > 0.1:
+                                    _time.sleep(min(pause, 5.0))
+                        last_throttle_size = cur_size
+                        last_throttle_time = _time.time()
 
                 if not ffmpeg_duration:
                     dm = re.search(r'Duration:\s*(\d+):(\d+):(\d+\.?\d*)', line)
@@ -9272,7 +9288,6 @@ class DownloadWorker(QThread):
                     elapsed = h*3600 + m*60 + s
                     pct = min(99, int(elapsed / ffmpeg_duration * 100))
 
-                    # Calculate speed + ETA
                     wall_elapsed = _time.time() - dl_start_time
                     speed_str = ""
                     eta_str = ""
@@ -9283,7 +9298,6 @@ class DownloadWorker(QThread):
                             eta_str = f"{eta_secs:.0f}s left"
                         else:
                             eta_str = f"{eta_secs/60:.1f}m left"
-                        # Estimate speed from file size if available
                         if os.path.exists(part_path):
                             if now - last_speed_update >= 1.0:
                                 fsize = os.path.getsize(part_path)
@@ -9295,6 +9309,8 @@ class DownloadWorker(QThread):
                                 last_speed_update = now
 
                     parts = [f"{pct}%"]
+                    if throttle_limit > 0:
+                        parts.append(f"cap:{throttle_kbps}KB/s")
                     if speed_str: parts.append(speed_str)
                     if eta_str: parts.append(eta_str)
                     status = "  |  ".join(parts)

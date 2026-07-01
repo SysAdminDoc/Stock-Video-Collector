@@ -155,6 +155,33 @@ class BandwidthScheduleTests(unittest.TestCase):
             allowed, throttle = worker._check_bw_schedule()
             self.assertTrue(allowed)
 
+    def test_throttle_day_returns_kbps_during_hours(self):
+        worker = app.DownloadWorker.__new__(app.DownloadWorker)
+        worker._bw_schedule = 'throttle_day'
+        with patch('artlist_scraper.datetime') as mock_dt:
+            mock_dt.now.return_value = type('DT', (), {'hour': 12, 'strftime': lambda s, f: ''})()
+            allowed, throttle = worker._check_bw_schedule()
+            self.assertTrue(allowed)
+            self.assertEqual(throttle, 500)
+
+    def test_throttle_day_no_limit_outside_hours(self):
+        worker = app.DownloadWorker.__new__(app.DownloadWorker)
+        worker._bw_schedule = 'throttle_day'
+        with patch('artlist_scraper.datetime') as mock_dt:
+            mock_dt.now.return_value = type('DT', (), {'hour': 22, 'strftime': lambda s, f: ''})()
+            allowed, throttle = worker._check_bw_schedule()
+            self.assertTrue(allowed)
+            self.assertEqual(throttle, 0)
+
+    def test_throttle_biz_returns_200_kbps(self):
+        worker = app.DownloadWorker.__new__(app.DownloadWorker)
+        worker._bw_schedule = 'throttle_biz'
+        with patch('artlist_scraper.datetime') as mock_dt:
+            mock_dt.now.return_value = type('DT', (), {'hour': 14, 'strftime': lambda s, f: ''})()
+            allowed, throttle = worker._check_bw_schedule()
+            self.assertTrue(allowed)
+            self.assertEqual(throttle, 200)
+
 
 class FtsQuerySafetyTests(unittest.TestCase):
     def setUp(self):
