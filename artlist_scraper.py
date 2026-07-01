@@ -82,7 +82,7 @@ import secrets as _secrets
 
 APP_NAME = "Stock Video Collector"
 APP_PACKAGE_NAME = "Stock-Video-Collector"
-APP_VERSION = "0.7.30"
+APP_VERSION = "0.7.31"
 APP_WINDOW_TITLE = f"{APP_NAME}  v{APP_VERSION}"
 APP_CONFIG_DIR_NAME = "StockVideoCollector"
 LEGACY_APP_CONFIG_DIR_NAME = "ArtlistScraper"
@@ -132,7 +132,7 @@ def _branding_icon_path() -> Path:
 
 
 _SENSITIVE_KEY_RE = re.compile(
-    r'(api[_-]?key|access[_-]?key|secret|token|password|passwd|pwd|authorization|cookie|session|bearer|client[_-]?secret|refresh[_-]?token|proxy)',
+    r'(api[_-]?key|access[_-]?key|secret|token|password|passwd|pwd|authorization|cookie|session|bearer|client[_-]?secret|refresh[_-]?token|proxy|webhook)',
     re.IGNORECASE,
 )
 _SENSITIVE_QUERY_RE = re.compile(
@@ -144,7 +144,7 @@ _SENSITIVE_HEADER_RE = re.compile(
     re.IGNORECASE,
 )
 _SENSITIVE_ASSIGNMENT_RE = re.compile(
-    r'\b([A-Za-z0-9_.-]*(?:api[_-]?key|access[_-]?key|token|secret|signature|sig|auth|credential|password|passwd|pwd|cookie|session)[A-Za-z0-9_.-]*\s*[:=]\s*)([^\s,;&]+)',
+    r'\b([A-Za-z0-9_.-]*(?:api[_-]?key|access[_-]?key|token|secret|signature|sig|auth|credential|password|passwd|pwd|cookie|session|webhook)[A-Za-z0-9_.-]*\s*[:=]\s*)([^\s,;&]+)',
     re.IGNORECASE,
 )
 _BEARER_RE = re.compile(r'\bBearer\s+[A-Za-z0-9._~+/=-]+', re.IGNORECASE)
@@ -298,7 +298,7 @@ if __name__ == '__main__':
 
 import json, sqlite3, asyncio, threading
 from datetime import datetime
-from urllib.parse import urlparse, urlunparse, parse_qs, urlencode, unquote, urljoin
+from urllib.parse import urlparse, urlunparse, parse_qs, urlencode, unquote, urljoin, quote
 
 from connectors import (
     DEFAULT_PER_PAGE,
@@ -571,6 +571,68 @@ def _browser_profile_context(cfg, session_key=''):
         'slots': slots,
         'rotating': True,
     }
+
+
+def _challenge_notification_message(profile_name, page_url, headless=True):
+    mode = 'headless' if headless else 'visible'
+    profile = str(profile_name or 'Unknown profile')
+    safe_url = _url_for_log(page_url or '')
+    return (
+        f"Stock Video Collector challenge detected\n"
+        f"Profile: {profile}\n"
+        f"Mode: {mode}\n"
+        f"URL: {safe_url}\n"
+        f"Action: open the running browser session and solve the CAPTCHA/challenge."
+    )
+
+
+def _post_json_payload(url, payload, timeout=10):
+    import urllib.request
+
+    body = json.dumps(payload).encode('utf-8')
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={'Content-Type': 'application/json', 'User-Agent': f'{APP_PACKAGE_NAME}/{APP_VERSION}'},
+        method='POST')
+    with _safe_urlopen(req, timeout=timeout) as resp:
+        return getattr(resp, 'status', None) or resp.getcode()
+
+
+def _send_challenge_notifications(cfg, profile_name, page_url, headless=True):
+    if not _cfg_bool(cfg, 'challenge_notify_enabled', False):
+        return []
+
+    message = _challenge_notification_message(profile_name, page_url, headless=headless)
+    results = []
+
+    discord_webhook = str((cfg or {}).get('challenge_discord_webhook_url') or '').strip()
+    if discord_webhook:
+        try:
+            status = _post_json_payload(discord_webhook, {
+                'content': message[:1900],
+                'allowed_mentions': {'parse': []},
+            })
+            results.append(('Discord', True, f'HTTP {status}'))
+        except Exception as exc:
+            results.append(('Discord', False, str(exc)[:160]))
+
+    telegram_token = str((cfg or {}).get('challenge_telegram_bot_token') or '').strip()
+    telegram_chat_id = str((cfg or {}).get('challenge_telegram_chat_id') or '').strip()
+    if telegram_token and telegram_chat_id:
+        token_path = quote(telegram_token, safe='')
+        telegram_url = f'https://api.telegram.org/bot{token_path}/sendMessage'
+        try:
+            status = _post_json_payload(telegram_url, {
+                'chat_id': telegram_chat_id,
+                'text': message[:3900],
+                'disable_web_page_preview': True,
+            })
+            results.append(('Telegram', True, f'HTTP {status}'))
+        except Exception as exc:
+            results.append(('Telegram', False, str(exc)[:160]))
+
+    return results
 
 
 from PyQt6.QtWidgets import (
@@ -3328,6 +3390,7 @@ class CrawlerWorker(QThread):
             f"{datetime.now().isoformat()}|{random.random()}|"
             f"{','.join(p.name for p in self._profiles)}"
         )
+        self._challenge_notifications_sent = set()
 
     def _api_start_url_for_profile(self, profile):
         if len(self._profiles) == 1:
@@ -3686,6 +3749,27 @@ class CrawlerWorker(QThread):
             self.log(f"Challenge detection error: {e}", "DEBUG")
         return False
 
+    def _send_challenge_notification_once(self, page_url):
+        if not _cfg_bool(self.cfg, 'challenge_notify_enabled', False):
+            return
+        key = hashlib.sha1(str(page_url or '').encode('utf-8')).hexdigest()
+        if key in self._challenge_notifications_sent:
+            return
+        self._challenge_notifications_sent.add(key)
+        results = _send_challenge_notifications(
+            self.cfg,
+            self.profile.name if self.profile else '',
+            page_url,
+            headless=self.cfg.get('headless', True))
+        if not results:
+            self.log("Challenge notification enabled but no Discord webhook or Telegram chat is configured.", "WARN")
+            return
+        for channel, ok, detail in results:
+            if ok:
+                self.log(f"Challenge notification sent via {channel} ({detail}).", "OK")
+            else:
+                self.log(f"Challenge notification failed via {channel}: {detail}", "WARN")
+
     async def _handle_challenge(self, page, browser, pw):
         """
         When a challenge is detected:
@@ -3696,6 +3780,7 @@ class CrawlerWorker(QThread):
         """
         self.log("Bot challenge detected — waiting for clearance...", "WARN")
         self.status_signal.emit("challenge")
+        self._send_challenge_notification_once(getattr(page, 'url', ''))
 
         # If running headless, we can't solve CAPTCHAs — inform user
         if self.cfg.get('headless', True):
@@ -9189,6 +9274,10 @@ class MainWindow(QMainWindow):
             'chk_headless': ("Headless mode", "Run the browser without a visible window"),
             'chk_resume': ("Resume mode", "Skip pages already marked crawled"),
             'chk_crawl_trace': ("Save failed-crawl diagnostics", "Save redacted trace bundles when browser crawls fail"),
+            'chk_challenge_notify': ("Challenge notification toggle", "Sends a Discord or Telegram ping when a browser challenge is detected"),
+            'inp_challenge_discord_webhook': ("Discord challenge webhook", "Discord webhook URL used for challenge notifications"),
+            'inp_challenge_telegram_bot_token': ("Telegram challenge bot token", "Telegram bot token used for challenge notifications"),
+            'inp_challenge_telegram_chat_id': ("Telegram challenge chat ID", "Telegram chat ID that receives challenge notifications"),
             'chk_rotate_browser_profiles': ("Rotate browser profile slots", "Rotates Playwright persistent profile directories between crawl sessions"),
             'spin_browser_profile_slots': ("Browser profile slot count", "Number of persistent browser profile slots available for rotation"),
             'chk_proxy_pool': ("Use proxy pool", "Routes Playwright browser launches through one proxy from the configured proxy pool"),
@@ -9292,6 +9381,7 @@ class MainWindow(QMainWindow):
     def _apply_focus_order(self):
         order = [
             'inp_url', 'combo_crawl_mode', 'btn_start', 'btn_pause', 'btn_stop',
+            'chk_challenge_notify', 'inp_challenge_discord_webhook', 'inp_challenge_telegram_bot_token', 'inp_challenge_telegram_chat_id',
             'chk_rotate_browser_profiles', 'spin_browser_profile_slots', 'chk_proxy_pool', 'chk_residential_proxy_sticky', 'inp_proxy_pool_path',
             'inp_search', 'combo_sort', 'combo_duration', 'combo_user_collection',
             'btn_catalog', 'btn_select_visible', 'btn_clear_selection',
@@ -9426,6 +9516,37 @@ class MainWindow(QMainWindow):
         g4.addWidget(self.chk_headless); g4.addSpacing(Z(30)); g4.addWidget(self.chk_resume)
         g4.addSpacing(Z(30)); g4.addWidget(self.chk_crawl_trace); g4.addStretch()
         lay.addWidget(grp4)
+
+        # Human-in-the-loop challenge notifications
+        grp_challenge = QGroupBox("Challenge Notifications"); gc = QVBoxLayout(grp_challenge)
+        self.chk_challenge_notify = QCheckBox("Ping when a CAPTCHA or bot challenge appears")
+        self.chk_challenge_notify.setToolTip("When enabled, send a one-time Discord/Telegram notification for each challenged page.")
+        gc.addWidget(self.chk_challenge_notify)
+
+        row_discord = QHBoxLayout()
+        lab_discord = QLabel("Discord webhook:"); lab_discord.setFixedWidth(Z(135))
+        row_discord.addWidget(lab_discord)
+        self.inp_challenge_discord_webhook = QLineEdit()
+        self.inp_challenge_discord_webhook.setEchoMode(QLineEdit.EchoMode.Password)
+        self.inp_challenge_discord_webhook.setPlaceholderText("https://discord.com/api/webhooks/...")
+        row_discord.addWidget(self.inp_challenge_discord_webhook, 1)
+        gc.addLayout(row_discord)
+
+        row_telegram = QHBoxLayout()
+        lab_token = QLabel("Telegram token:"); lab_token.setFixedWidth(Z(135))
+        row_telegram.addWidget(lab_token)
+        self.inp_challenge_telegram_bot_token = QLineEdit()
+        self.inp_challenge_telegram_bot_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.inp_challenge_telegram_bot_token.setPlaceholderText("Bot token")
+        row_telegram.addWidget(self.inp_challenge_telegram_bot_token, 1)
+        row_telegram.addWidget(QLabel("Chat ID:"))
+        self.inp_challenge_telegram_chat_id = QLineEdit()
+        self.inp_challenge_telegram_chat_id.setPlaceholderText("123456789")
+        self.inp_challenge_telegram_chat_id.setFixedWidth(Z(150))
+        row_telegram.addWidget(self.inp_challenge_telegram_chat_id)
+        gc.addLayout(row_telegram)
+        gc.addWidget(self._sub("Notifications are disabled unless a webhook or Telegram bot/chat is configured. URLs and tokens are stored through the secret-safe config path."))
+        lay.addWidget(grp_challenge)
 
         # Browser identity / proxy rotation
         grp_proxy = QGroupBox("Browser Identity Rotation"); gp2 = QVBoxLayout(grp_proxy)
@@ -11163,6 +11284,11 @@ class MainWindow(QMainWindow):
             cfg['ui_zoom'] = self._zoom_combo.currentData() or 1.0
         if hasattr(self, 'spin_backup_retention'):
             cfg['backup_retention_count'] = self.spin_backup_retention.value()
+        if hasattr(self, 'chk_challenge_notify'):
+            cfg['challenge_notify_enabled'] = self.chk_challenge_notify.isChecked()
+            cfg['challenge_discord_webhook_url'] = self.inp_challenge_discord_webhook.text().strip()
+            cfg['challenge_telegram_bot_token'] = self.inp_challenge_telegram_bot_token.text().strip()
+            cfg['challenge_telegram_chat_id'] = self.inp_challenge_telegram_chat_id.text().strip()
         if hasattr(self, 'chk_rotate_browser_profiles'):
             cfg['rotate_browser_profiles'] = self.chk_rotate_browser_profiles.isChecked()
             cfg['browser_profile_slots'] = self.spin_browser_profile_slots.value()
@@ -12377,6 +12503,11 @@ class MainWindow(QMainWindow):
             self.spin_bw_limit.setValue(cfg['bw_limit'])
         if 'backup_retention_count' in cfg and hasattr(self, 'spin_backup_retention'):
             self.spin_backup_retention.setValue(max(1, min(500, int(cfg['backup_retention_count']))))
+        if hasattr(self, 'chk_challenge_notify'):
+            self.chk_challenge_notify.setChecked(_cfg_bool(cfg, 'challenge_notify_enabled', False))
+            self.inp_challenge_discord_webhook.setText(str(cfg.get('challenge_discord_webhook_url', '') or ''))
+            self.inp_challenge_telegram_bot_token.setText(str(cfg.get('challenge_telegram_bot_token', '') or ''))
+            self.inp_challenge_telegram_chat_id.setText(str(cfg.get('challenge_telegram_chat_id', '') or ''))
         if hasattr(self, 'chk_rotate_browser_profiles'):
             self.chk_rotate_browser_profiles.setChecked(_cfg_bool(cfg, 'rotate_browser_profiles', False))
             if 'browser_profile_slots' in cfg:

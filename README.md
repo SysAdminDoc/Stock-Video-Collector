@@ -1,6 +1,6 @@
 # Stock Video Collector
 
-![Version](https://img.shields.io/badge/version-0.7.30-blue)
+![Version](https://img.shields.io/badge/version-0.7.31-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white)
 ![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?logo=qt&logoColor=white)
 ![Playwright](https://img.shields.io/badge/Playwright-Headless_Browser-2EAD33?logo=playwright&logoColor=white)
@@ -91,6 +91,7 @@ The **Generic** profile works on any site — it intercepts all video network re
 | Stealth mode | Hides `navigator.webdriver` flag, spoofs plugin array and WebGL vendor/renderer |
 | Challenge detection | Auto-detects Cloudflare, CAPTCHA, and challenge pages |
 | Manual solve mode | Switches to visible browser for CAPTCHA solving, resumes automatically on clearance |
+| Challenge notifications | Optional one-time Discord/Telegram ping when a CAPTCHA or bot challenge appears |
 | Persistent profile | Browser session cookies, localStorage, and tokens persist across runs |
 | Profile slot rotation | Optional `browser_profiles/slot-N` rotation for Playwright persistent contexts |
 | Proxy pool | Optional `proxies.txt` support for Playwright browser launches; supports `host:port`, HTTP(S), SOCKS4, and SOCKS5 entries |
@@ -230,6 +231,7 @@ All settings persist automatically in a JSON config file. Key options:
 | Max pages | 0 (unlimited) | Stop after N pages |
 | Max depth | 3 | Link-following depth |
 | Headless | On | Run browser without visible window |
+| Challenge notifications | Off | Send a Discord webhook or Telegram bot message when a browser challenge is detected |
 | Rotate browser profiles / slots | Off / 4 | Use separate persistent browser-profile directories between crawl sessions |
 | Proxy pool / path | Off / app-data `proxies.txt` | Route Playwright browser launches through one proxy entry from a user-supplied proxy file |
 | Residential sticky proxy session | Off | Keep crawl, API discovery, and bootstrap browser launches on one selected proxy during the same worker session |
@@ -293,7 +295,7 @@ Available variables: `{title}`, `{clip_id}`, `{creator}`, `{collection}`, `{reso
 
 **Search results seem wrong or incomplete** — Click the "🔄 Rebuild Index" button on the Crawl tab to rebuild the FTS5 search index from scratch.
 
-**Bot challenge / CAPTCHA detected** — Uncheck "Headless" mode and restart the crawl. The browser will open visibly so you can solve the challenge manually. The crawler pauses and resumes automatically once the challenge clears.
+**Bot challenge / CAPTCHA detected** — Uncheck "Headless" mode and restart the crawl. The browser will open visibly so you can solve the challenge manually. Optional Challenge Notifications can ping a configured Discord webhook or Telegram bot/chat when the challenge appears.
 
 **Downloads fail repeatedly** — Check that ffmpeg is installed and on your PATH. The scraper auto-detects ffmpeg in common locations, but if it can't find it, downloads that require HLS→MP4 conversion will fail.
 

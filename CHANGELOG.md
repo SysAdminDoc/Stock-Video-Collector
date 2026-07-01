@@ -2,6 +2,11 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.7.31] - 2026-07-01
+
+- Added: Human-in-the-loop challenge notifications with optional Discord webhook and Telegram bot/chat pings when a CAPTCHA or bot challenge appears.
+- Added: Secret-safe Configure-tab fields and tests for challenge notification payloads and URL redaction.
+
 ## [v0.7.30] - 2026-07-01
 
 - Added: Residential/sticky proxy session mode so crawl, API discovery, and Direct HTTP browser bootstrap launches use the same selected proxy for a worker session.
