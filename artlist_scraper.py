@@ -81,7 +81,7 @@ import secrets as _secrets
 
 APP_NAME = "Stock Video Collector"
 APP_PACKAGE_NAME = "Stock-Video-Collector"
-APP_VERSION = "0.7.21"
+APP_VERSION = "0.7.22"
 APP_WINDOW_TITLE = f"{APP_NAME}  v{APP_VERSION}"
 APP_CONFIG_DIR_NAME = "StockVideoCollector"
 LEGACY_APP_CONFIG_DIR_NAME = "ArtlistScraper"
@@ -979,7 +979,12 @@ class DB:
                           ('file_sha256', 'TEXT DEFAULT ""'),
                           ('perceptual_hash', 'TEXT DEFAULT ""'),
                           ('duplicate_group', 'TEXT DEFAULT ""'),
-                          ('duplicate_status', 'TEXT DEFAULT ""')]:
+                          ('duplicate_status', 'TEXT DEFAULT ""'),
+                          ('thumb_status', 'TEXT DEFAULT ""'),
+                          ('thumb_error', 'TEXT DEFAULT ""'),
+                          ('thumb_error_at', 'TEXT DEFAULT ""'),
+                          ('thumb_retry_count', 'INTEGER DEFAULT 0'),
+                          ('thumb_source', 'TEXT DEFAULT ""')]:
             try:
                 self.conn.execute(f"ALTER TABLE clips ADD COLUMN {col} {defn}")
             except sqlite3.OperationalError:
@@ -1445,19 +1450,80 @@ class DB:
     def update_thumb_path(self, clip_id, thumb_path):
         try:
             with self._lock:
-                self.conn.execute("UPDATE clips SET thumb_path=? WHERE clip_id=?", (thumb_path, clip_id))
+                self.conn.execute("""
+                    UPDATE clips
+                    SET thumb_path=?, thumb_status='done', thumb_error='',
+                        thumb_error_at='', thumb_source=''
+                    WHERE clip_id=?
+                """, (thumb_path, clip_id))
                 self.conn.commit()
         except Exception as e:
             print(f"[DB WARN] update_thumb_path failed for {clip_id}: {e}")
 
-    def get_clips_needing_thumbs(self, limit=300):
+    def mark_thumb_failure(self, clip_id, reason, source=''):
+        if not clip_id:
+            return
+        reason = _redact_text(str(reason or 'thumbnail generation failed'))[:500]
+        source = _redact_text(str(source or ''))[:500]
+        try:
+            with self._lock:
+                self.conn.execute("""
+                    UPDATE clips
+                    SET thumb_status='error', thumb_error=?, thumb_error_at=?,
+                        thumb_retry_count=COALESCE(thumb_retry_count, 0) + 1,
+                        thumb_source=?
+                    WHERE clip_id=?
+                """, (reason, datetime.now().isoformat(timespec='seconds'), source, clip_id))
+                self.conn.commit()
+        except Exception as e:
+            print(f"[DB WARN] mark_thumb_failure failed for {clip_id}: {e}")
+
+    def reset_thumb_failure(self, clip_id=None):
+        try:
+            with self._lock:
+                if clip_id:
+                    self.conn.execute("""
+                        UPDATE clips
+                        SET thumb_status='', thumb_error='', thumb_error_at='', thumb_source=''
+                        WHERE clip_id=?
+                    """, (clip_id,))
+                else:
+                    self.conn.execute("""
+                        UPDATE clips
+                        SET thumb_status='', thumb_error='', thumb_error_at='', thumb_source=''
+                        WHERE thumb_status='error'
+                    """)
+                self.conn.commit()
+        except Exception as e:
+            print(f"[DB WARN] reset_thumb_failure failed: {e}")
+
+    def get_failed_thumbnails(self, limit=500):
+        return self.execute("""
+            SELECT * FROM clips
+            WHERE thumb_status='error'
+            ORDER BY thumb_error_at DESC, found_at DESC LIMIT ?
+        """, (limit,)).fetchall()
+
+    def get_clips_by_ids(self, clip_ids):
+        ids = [str(cid) for cid in (clip_ids or []) if cid]
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        return self.execute(f"""
+            SELECT * FROM clips
+            WHERE clip_id IN ({placeholders})
+        """, tuple(ids)).fetchall()
+
+    def get_clips_needing_thumbs(self, limit=300, include_failed=False):
         """Clips with M3U8/local_path but no thumbnail yet."""
+        failed_clause = "" if include_failed else "AND (thumb_status IS NULL OR thumb_status != 'error')"
         return self.execute("""
             SELECT * FROM clips
             WHERE (thumb_path IS NULL OR thumb_path = '')
               AND (m3u8_url != '' OR local_path != '' OR thumbnail_url != '')
+              {failed_clause}
             ORDER BY found_at DESC LIMIT ?
-        """, (limit,)).fetchall()
+        """.format(failed_clause=failed_clause), (limit,)).fetchall()
 
     _VALID_COLUMNS = frozenset({
         'creator','collection','resolution','frame_rate','dl_status',
@@ -1466,6 +1532,7 @@ class DB:
             'license_name','license_url','attribution_required',
             'attribution_text','terms_url','preview_status',
             'file_sha256','perceptual_hash','duplicate_group','duplicate_status',
+            'thumb_status','thumb_error','thumb_error_at','thumb_retry_count','thumb_source',
         })
 
     def distinct_values(self, col):
@@ -1759,7 +1826,7 @@ class DB:
 
     def search_assets(self, query='', filters=None, mode='OR',
                       favorites_only=False, downloaded_only=False,
-                      duplicates_only=False,
+                      duplicates_only=False, thumb_failed_only=False,
                       duration_range=None, collection_id=None,
                       min_rating=0, sort_by='', limit=3000, offset=0):
         """
@@ -1809,6 +1876,10 @@ class DB:
         # Duplicate review filter
         if duplicates_only:
             base += " AND c.duplicate_group IS NOT NULL AND c.duplicate_group != ''"
+
+        # Thumbnail failure filter
+        if thumb_failed_only:
+            base += " AND c.thumb_status = 'error'"
 
         # Rating filter
         if min_rating > 0:
@@ -6503,22 +6574,38 @@ class ThumbnailWorker(QThread):
                 continue
 
             ok = False
+            failure_reasons = []
+            failure_source = ''
 
             # 1. Extract from downloaded MP4 (fastest, highest quality)
             if not ok and local_path and os.path.isfile(local_path):
-                ok = self._from_mp4(ffmpeg, local_path, out_path)
+                ok, reason = self._from_mp4(ffmpeg, local_path, out_path)
+                failure_source = local_path
+                if not ok and reason:
+                    failure_reasons.append(reason)
 
             # 2. Fetch Artlist's own thumbnail URL
             if not ok and thumb_url:
-                ok = self._from_url(thumb_url, out_path)
+                ok, reason = self._from_url(thumb_url, out_path)
+                failure_source = thumb_url
+                if not ok and reason:
+                    failure_reasons.append(reason)
 
             if ok:
                 self.db.update_thumb_path(clip_id, out_path)
                 self.thumb_ready.emit(clip_id, out_path)
+            else:
+                reason = '; '.join(failure_reasons) if failure_reasons else "No local video or thumbnail URL available"
+                if not failure_source:
+                    failure_source = local_path or thumb_url or m3u8_url
+                if hasattr(self.db, 'mark_thumb_failure'):
+                    self.db.mark_thumb_failure(clip_id, reason, failure_source)
 
         self.all_done.emit()
 
     def _from_mp4(self, ffmpeg, mp4_path, out_path):
+        if not ffmpeg:
+            return False, "ffmpeg not found"
         try:
             cmd = [ffmpeg, '-y',
                    '-ss', '3',
@@ -6528,9 +6615,12 @@ class ThumbnailWorker(QThread):
                    '-q:v', '3',
                    out_path]
             r = subprocess.run(cmd, capture_output=True, timeout=30)
-            return r.returncode == 0 and os.path.isfile(out_path) and os.path.getsize(out_path) > 0
-        except Exception:
-            return False
+            if r.returncode == 0 and os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
+                return True, ''
+            err = (r.stderr or b'').decode('utf-8', errors='replace').strip()
+            return False, f"ffmpeg thumbnail failed: {err[:180] or 'empty output'}"
+        except Exception as e:
+            return False, f"ffmpeg thumbnail exception: {e}"
 
     def _from_url(self, url, out_path):
         try:
@@ -6539,9 +6629,11 @@ class ThumbnailWorker(QThread):
             with _safe_urlopen(req, timeout=15) as resp:
                 with open(out_path, 'wb') as f:
                     f.write(resp.read())
-            return os.path.isfile(out_path) and os.path.getsize(out_path) > 0
-        except Exception:
-            return False
+            if os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
+                return True, ''
+            return False, "thumbnail URL returned empty file"
+        except Exception as e:
+            return False, f"thumbnail URL failed: {e}"
 
 
 
@@ -8047,6 +8139,7 @@ class MainWindow(QMainWindow):
             'chk_favorites': ("Favorites only", "Shows favorited clips only"),
             'chk_downloaded': ("Downloaded only", "Shows downloaded clips only"),
             'chk_duplicates': ("Duplicates only", "Shows exact and near-duplicate groups only"),
+            'chk_thumb_failed': ("Thumbnail failures only", "Shows clips whose thumbnail generation failed"),
             'btn_search_mode': ("Search mode", "Toggles OR and AND search term matching"),
             'spin_min_rating': ("Minimum rating", "Filters clips by minimum star rating"),
             'combo_saved_search': ("Saved searches", "Loads a saved library search"),
@@ -8057,6 +8150,7 @@ class MainWindow(QMainWindow):
             'lbl_import_status': ("Import status", "Shows local folder import progress"),
             'btn_import_folder': ("Import folder", "Scans a local folder for videos and catalogs them"),
             'btn_fetch_thumbs': ("Fetch thumbnails", "Fetches or regenerates missing thumbnail images"),
+            'btn_retry_thumb_errors': ("Retry thumbnail failures", "Resets failed thumbnail jobs and retries them"),
             '_detail_panel': ("Clip detail panel", "Shows metadata and actions for the selected clip"),
             '_detail_close_btn': ("Close detail panel", "Hides the detail panel in catalog mode"),
             '_preview_stack': ("Clip preview", "Shows the selected clip thumbnail or video preview"),
@@ -8116,7 +8210,7 @@ class MainWindow(QMainWindow):
             'btn_catalog', 'btn_select_visible', 'btn_clear_selection',
             'btn_backup_catalog', 'btn_backup_refresh', 'btn_backup_restore_selected',
             'btn_backup_prune', 'spin_backup_retention', 'backup_table',
-            'btn_import_folder', 'btn_fetch_thumbs', 'detail_notes', 'detail_user_tags',
+            'btn_import_folder', 'btn_fetch_thumbs', 'btn_retry_thumb_errors', 'detail_notes', 'detail_user_tags',
             'detail_coll_combo', 'inp_dl_dir', 'spin_concurrent', 'spin_max_retries',
             'spin_bw_limit', 'btn_dl_all', 'btn_dl_new', 'btn_dl_sel', 'inp_scan_dir',
             'inp_fn_template',
@@ -8496,6 +8590,13 @@ class MainWindow(QMainWindow):
         self.chk_duplicates.toggled.connect(self._do_search)
         frow2.addWidget(self.chk_duplicates)
 
+        # Thumbnail failures toggle
+        self.chk_thumb_failed = QCheckBox("Thumb Err")
+        self.chk_thumb_failed.setStyleSheet(f"color:{C('error')}; font-size:{Z(11)}px; font-weight:500;")
+        self.chk_thumb_failed.setToolTip("Show clips with failed thumbnail jobs")
+        self.chk_thumb_failed.toggled.connect(self._do_search)
+        frow2.addWidget(self.chk_thumb_failed)
+
         # AND/OR toggle
         self.btn_search_mode = QPushButton("OR")
         self.btn_search_mode.setObjectName("neutral"); self.btn_search_mode.setFixedSize(Z(36), Z(26))
@@ -8602,6 +8703,11 @@ class MainWindow(QMainWindow):
         self.btn_fetch_thumbs.setObjectName("neutral"); self.btn_fetch_thumbs.setFixedHeight(Z(30))
         self.btn_fetch_thumbs.clicked.connect(self._start_thumb_worker)
         brow.addWidget(self.btn_fetch_thumbs)
+        self.btn_retry_thumb_errors = QPushButton("Retry Thumb Errors")
+        self.btn_retry_thumb_errors.setObjectName("warning"); self.btn_retry_thumb_errors.setFixedHeight(Z(30))
+        self.btn_retry_thumb_errors.setToolTip("Reset failed thumbnail jobs and retry them")
+        self.btn_retry_thumb_errors.clicked.connect(self._retry_failed_thumbnails)
+        brow.addWidget(self.btn_retry_thumb_errors)
         lay.addLayout(brow)
         return w
 
@@ -8904,6 +9010,7 @@ class MainWindow(QMainWindow):
             ('Terms',      _g('terms_url') or _g('license_url'), C('accent_hover')),
             ('Preview',    _g('preview_status'), C('border_light')),
             ('Duplicate',  (f"{_g('duplicate_group')} / {_g('duplicate_status') or 'review'}" if _g('duplicate_group') else ''), C('warning')),
+            ('Thumbnail',  (f"{_g('thumb_status')} / {_g('thumb_error')}" if _g('thumb_status') == 'error' else _g('thumb_status')), C('error') if _g('thumb_status') == 'error' else C('success')),
             ('Status',     ('\u2713 Downloaded' if has_local else ('\u2717 Error' if _g('dl_status')=='error' else '\u2014')),
                           C('success') if has_local else (C('error') if _g('dl_status')=='error' else C('border_light'))),
             ('Clip ID',    clip_id,          C('text_muted')),
@@ -9208,6 +9315,13 @@ class MainWindow(QMainWindow):
             act_review.triggered.connect(lambda: self._ctx_set_duplicate_status(clip_ids, 'review'))
             menu.addSeparator()
 
+        thumb_menu = menu.addMenu("Thumbnails")
+        act_retry_thumb = thumb_menu.addAction("Retry Thumbnail")
+        act_retry_thumb.triggered.connect(lambda: self._ctx_retry_thumbnails(clip_ids))
+        act_reset_thumb = thumb_menu.addAction("Reset Thumbnail Failure")
+        act_reset_thumb.triggered.connect(lambda: self._ctx_reset_thumbnail_failures(clip_ids))
+        menu.addSeparator()
+
         # Download (single or bulk)
         has_m3u8 = [r for r in sel_rows if (r.get('m3u8_url') if isinstance(r, dict) else r['m3u8_url'])]
         if has_m3u8:
@@ -9249,6 +9363,23 @@ class MainWindow(QMainWindow):
         for cid in clip_ids:
             self.db.set_duplicate_status(cid, status)
         self._toast(f"Duplicate status set: {status}", 'success', 1800)
+        self._do_search()
+
+    def _ctx_reset_thumbnail_failures(self, clip_ids):
+        for cid in clip_ids:
+            self.db.reset_thumb_failure(cid)
+        self._toast(f"Thumbnail failure reset: {len(clip_ids)}", 'success', 1800)
+        self._do_search()
+
+    def _ctx_retry_thumbnails(self, clip_ids):
+        rows = self.db.get_clips_by_ids(clip_ids)
+        if not rows:
+            self._toast("No thumbnail jobs selected", 'warning', 1800)
+            return
+        for cid in clip_ids:
+            self.db.reset_thumb_failure(cid)
+        self._toast(f"Retrying thumbnail(s): {len(rows)}", 'success', 1800)
+        self._start_thumb_worker_for_rows(rows)
         self._do_search()
 
     def _detail_clip_id(self):
@@ -10147,6 +10278,7 @@ class MainWindow(QMainWindow):
         favorites_only = hasattr(self, 'chk_favorites') and self.chk_favorites.isChecked()
         downloaded_only = hasattr(self, 'chk_downloaded') and self.chk_downloaded.isChecked()
         duplicates_only = hasattr(self, 'chk_duplicates') and self.chk_duplicates.isChecked()
+        thumb_failed_only = hasattr(self, 'chk_thumb_failed') and self.chk_thumb_failed.isChecked()
         duration_range = self.combo_duration.currentText() if hasattr(self, 'combo_duration') else 'All'
         min_rating = self.spin_min_rating.value() if hasattr(self, 'spin_min_rating') else 0
 
@@ -10171,7 +10303,7 @@ class MainWindow(QMainWindow):
             rows = self.db.search_assets(
                 query=query, filters=filters, mode=mode,
                 favorites_only=favorites_only, downloaded_only=downloaded_only,
-                duplicates_only=duplicates_only,
+                duplicates_only=duplicates_only, thumb_failed_only=thumb_failed_only,
                 duration_range=duration_range, collection_id=collection_id,
                 min_rating=min_rating, sort_by=sort_by)
             # Convert sqlite3.Row to plain dicts for thread-safe GUI consumption
@@ -10211,6 +10343,8 @@ class MainWindow(QMainWindow):
             filters['_downloaded'] = True
         if hasattr(self, 'chk_duplicates') and self.chk_duplicates.isChecked():
             filters['_duplicates'] = True
+        if hasattr(self, 'chk_thumb_failed') and self.chk_thumb_failed.isChecked():
+            filters['_thumb_failed'] = True
         if hasattr(self, 'combo_duration') and self.combo_duration.currentText() != 'All':
             filters['_duration'] = self.combo_duration.currentText()
         if hasattr(self, 'spin_min_rating') and self.spin_min_rating.value() > 0:
@@ -10239,6 +10373,8 @@ class MainWindow(QMainWindow):
                     self.chk_downloaded.setChecked(filters.get('_downloaded', False))
                 if hasattr(self, 'chk_duplicates'):
                     self.chk_duplicates.setChecked(filters.get('_duplicates', False))
+                if hasattr(self, 'chk_thumb_failed'):
+                    self.chk_thumb_failed.setChecked(filters.get('_thumb_failed', False))
                 if hasattr(self, 'combo_duration'):
                     dur = filters.get('_duration', 'All')
                     di = self.combo_duration.findText(dur)
@@ -10371,13 +10507,11 @@ class MainWindow(QMainWindow):
         os.makedirs(d, exist_ok=True)
         return d
 
-    def _start_thumb_worker(self):
-        clips = self.db.get_clips_needing_thumbs(limit=500)
+    def _start_thumb_worker_for_rows(self, rows):
+        clips = DB._rows_to_dicts(rows) or []
         if not clips:
             self.status_bar.showMessage("All thumbnails up to date.", 3000)
             return
-        # Convert to plain dicts for thread-safe passing
-        clips = DB._rows_to_dicts(clips) or []
         thumb_dir = self._thumb_dir()
         self._thumb_worker = ThumbnailWorker(clips, thumb_dir, self.db)
         self._thumb_worker.thumb_ready.connect(self._on_thumb_ready)
@@ -10385,6 +10519,22 @@ class MainWindow(QMainWindow):
         self._thumb_worker.start()
         self.btn_fetch_thumbs.setText(f"Fetching {len(clips)}...")
         self.btn_fetch_thumbs.setEnabled(False)
+
+    def _start_thumb_worker(self, include_failed=False):
+        clips = self.db.get_clips_needing_thumbs(limit=500, include_failed=include_failed)
+        self._start_thumb_worker_for_rows(clips)
+
+    def _retry_failed_thumbnails(self):
+        failed = self.db.get_failed_thumbnails(limit=500)
+        if not failed:
+            self.status_bar.showMessage("No failed thumbnails to retry.", 3000)
+            self._toast("No failed thumbnails to retry", 'success', 2000)
+            return
+        self.db.reset_thumb_failure()
+        if hasattr(self, 'chk_thumb_failed'):
+            self.chk_thumb_failed.setChecked(False)
+        self._start_thumb_worker_for_rows(failed)
+        self._toast(f"Retrying {len(failed)} failed thumbnail(s)", 'success', 2500)
 
     def _on_thumb_ready(self, clip_id, thumb_path):
         # Update any matching card in the current view
@@ -10396,7 +10546,12 @@ class MainWindow(QMainWindow):
     def _on_thumbs_all_done(self):
         self.btn_fetch_thumbs.setText("Fetch Thumbnails")
         self.btn_fetch_thumbs.setEnabled(True)
-        self.status_bar.showMessage("Thumbnails ready.", 3000)
+        failed = len(self.db.get_failed_thumbnails(limit=1000))
+        if failed:
+            self.status_bar.showMessage(f"Thumbnails ready with {failed} failure(s).", 4000)
+            self._toast(f"{failed} thumbnail failure(s) need review", 'warning', 3500)
+        else:
+            self.status_bar.showMessage("Thumbnails ready.", 3000)
 
     # ── Local Folder Import ────────────────────────────────────────────────
 
@@ -10461,6 +10616,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'chk_favorites'): self.chk_favorites.setChecked(False)
         if hasattr(self, 'chk_downloaded'): self.chk_downloaded.setChecked(False)
         if hasattr(self, 'chk_duplicates'): self.chk_duplicates.setChecked(False)
+        if hasattr(self, 'chk_thumb_failed'): self.chk_thumb_failed.setChecked(False)
         if hasattr(self, 'spin_min_rating'): self.spin_min_rating.setValue(0)
         if hasattr(self, 'btn_search_mode'):
             self.btn_search_mode.setChecked(False)

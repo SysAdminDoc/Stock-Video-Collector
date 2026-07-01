@@ -2,6 +2,11 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.7.22] - 2026-06-30
+
+- Added: Thumbnail failure diagnostics with persisted reason/source/timestamp/retry count and a Library failed-thumbnail filter.
+- Added: Retry/reset thumbnail actions for failed thumbnail jobs without reprocessing every healthy clip.
+
 ## [v0.7.21] - 2026-06-30
 
 - Added: Database backup catalog with SHA-256, SQLite integrity status, selected restore, and retention pruning controls.

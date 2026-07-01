@@ -1,6 +1,6 @@
 # Stock Video Collector
 
-![Version](https://img.shields.io/badge/version-0.7.21-blue)
+![Version](https://img.shields.io/badge/version-0.7.22-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white)
 ![PyQt6](https://img.shields.io/badge/PyQt6-GUI-41CD52?logo=qt&logoColor=white)
 ![Playwright](https://img.shields.io/badge/Playwright-Headless_Browser-2EAD33?logo=playwright&logoColor=white)
@@ -148,7 +148,7 @@ The crawler uses four complementary strategies to find video URLs on every page:
 | Bandwidth limiting | Optional download speed cap |
 | Filename templates | Customizable output filenames: `{title}`, `{clip_id}`, `{creator}`, `{collection}`, `{resolution}` |
 | Sidecar metadata | JSON metadata file, including license/provenance fields, written alongside each downloaded MP4 |
-| Thumbnail extraction | Auto-extracts a thumbnail frame from downloaded videos |
+| Thumbnail extraction | Auto-extracts thumbnails and records retryable HTTP/ffmpeg failure diagnostics |
 
 ### Export Formats
 
