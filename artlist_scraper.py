@@ -2575,48 +2575,50 @@ class DB:
                 print(f"[DB WARN] clear_all FTS recreate failed: {e}")
             self.conn.commit()
 
+    def _rebuild_fts_unlocked(self):
+        """Internal FTS rebuild — caller must already hold self._lock."""
+        self.conn.execute("DROP TABLE IF EXISTS clips_fts")
+        self.conn.execute("""
+            CREATE VIRTUAL TABLE clips_fts USING fts5(
+                title, creator, collection, tags, resolution, camera, duration,
+                content='clips', content_rowid='id',
+                tokenize='porter unicode61'
+            )
+        """)
+        self.conn.execute("""
+            INSERT INTO clips_fts(rowid, title, creator, collection, tags,
+                                  resolution, camera, duration)
+            SELECT id, COALESCE(title,''), COALESCE(creator,''),
+                   COALESCE(collection,''),
+                   COALESCE(tags,'') || ' ' || COALESCE(user_tags,''),
+                   COALESCE(resolution,''), COALESCE(camera,''),
+                   COALESCE(duration,'')
+            FROM clips
+        """)
+        self.conn.commit()
+        count = self.conn.execute("SELECT COUNT(*) FROM clips_fts").fetchone()[0]
+        print(f"[DB] FTS index rebuilt (DROP+recreate): {count} rows indexed")
+        return count
+
     def rebuild_fts(self):
-        """Nuclear FTS rebuild — DROP + recreate + repopulate.
-        Handles corruption where even DELETE FROM clips_fts fails."""
+        """Nuclear FTS rebuild — DROP + recreate + repopulate."""
         try:
             with self._lock:
-                # Nuclear: DROP corrupted table entirely, then recreate
-                self.conn.execute("DROP TABLE IF EXISTS clips_fts")
-                self.conn.execute("""
-                    CREATE VIRTUAL TABLE clips_fts USING fts5(
-                        title, creator, collection, tags, resolution, camera, duration,
-                        content='clips', content_rowid='id',
-                        tokenize='porter unicode61'
-                    )
-                """)
-                self.conn.execute("""
-                    INSERT INTO clips_fts(rowid, title, creator, collection, tags,
-                                          resolution, camera, duration)
-                    SELECT id, COALESCE(title,''), COALESCE(creator,''),
-                           COALESCE(collection,''),
-                           COALESCE(tags,'') || ' ' || COALESCE(user_tags,''),
-                           COALESCE(resolution,''), COALESCE(camera,''),
-                           COALESCE(duration,'')
-                    FROM clips
-                """)
-                self.conn.commit()
-                count = self.conn.execute("SELECT COUNT(*) FROM clips_fts").fetchone()[0]
-                print(f"[DB] FTS index rebuilt (DROP+recreate): {count} rows indexed")
-                return count
+                return self._rebuild_fts_unlocked()
         except Exception as e:
             print(f"[DB ERROR] FTS rebuild failed: {e}")
             return -1
 
-    _fts_recovering = False  # prevent recursive recovery
+    _fts_recovering = False
 
     def _fts_recover(self):
-        """Auto-recover from FTS corruption. Called when 'disk image is malformed' detected."""
+        """Auto-recover from FTS corruption. Called from within lock scope."""
         if self._fts_recovering:
             return False
         self._fts_recovering = True
         print("[DB] FTS corruption detected — running automatic recovery...")
         try:
-            result = self.rebuild_fts()
+            result = self._rebuild_fts_unlocked()
             self._fts_recovering = False
             return result >= 0
         except Exception as e:
@@ -11730,45 +11732,65 @@ class MainWindow(QMainWindow):
         current = set(os.listdir(path))
         new_files = current - self._watch_existing
         self._watch_existing = current
-        imported = 0
+        video_files = []
         for fname in new_files:
             ext = os.path.splitext(fname)[1].lower()
-            if ext not in VIDEO_EXTS:
-                continue
-            fpath = os.path.join(path, fname)
-            if not os.path.isfile(fpath):
-                continue
-            clip_id = 'watch_' + hashlib.md5(os.path.abspath(fpath).encode()).hexdigest()[:12]
-            existing = self.db.execute("SELECT clip_id FROM clips WHERE clip_id=?", (clip_id,)).fetchone()
-            if existing:
-                continue
-            title = os.path.splitext(fname)[0]
-            clip = {
-                'clip_id': clip_id, 'title': title, 'source_url': fpath,
-                'source_site': 'Watch Folder', 'm3u8_url': '', 'local_path': fpath,
-                'dl_status': 'done', 'collection': os.path.basename(path),
-            }
-            ffprobe = _get_ffprobe()
-            if ffprobe:
+            if ext in VIDEO_EXTS:
+                fpath = os.path.join(path, fname)
+                if os.path.isfile(fpath):
+                    video_files.append((fname, fpath))
+        if not video_files:
+            return
+        coll_name = os.path.basename(path)
+        db = self.db
+
+        def _run():
+            imported = 0
+            for fname, fpath in video_files:
+                clip_id = 'watch_' + hashlib.md5(os.path.abspath(fpath).encode()).hexdigest()[:12]
+                existing = db.execute("SELECT clip_id FROM clips WHERE clip_id=?", (clip_id,)).fetchone()
+                if existing:
+                    continue
                 try:
-                    info = json.loads(subprocess.run(
-                        [ffprobe, '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', fpath],
-                        capture_output=True, text=True, timeout=10).stdout)
-                    for s in info.get('streams', []):
-                        if s.get('codec_type') == 'video':
-                            clip['resolution'] = f"{s.get('width', '?')}x{s.get('height', '?')}"
-                            break
-                    dur = float(info.get('format', {}).get('duration', 0))
-                    if dur:
-                        clip['duration'] = _format_duration_seconds(dur)
-                except Exception:
-                    pass
-            self.db.save_clip(clip)
-            self.db.update_local_path(clip_id, fpath, 'done')
-            imported += 1
-        if imported:
-            self._do_search()
-            self._toast(f"Watch folder: imported {imported} new clip(s)", 'success', 3000)
+                    fsize = os.path.getsize(fpath)
+                    if fsize == 0:
+                        continue
+                except OSError:
+                    continue
+                title = os.path.splitext(fname)[0]
+                clip = {
+                    'clip_id': clip_id, 'title': title, 'source_url': fpath,
+                    'source_site': 'Watch Folder', 'm3u8_url': '', 'local_path': fpath,
+                    'dl_status': 'done', 'collection': coll_name,
+                }
+                ffprobe = _get_ffprobe()
+                if ffprobe:
+                    try:
+                        info = json.loads(subprocess.run(
+                            [ffprobe, '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', fpath],
+                            capture_output=True, text=True, timeout=10).stdout)
+                        for s in info.get('streams', []):
+                            if s.get('codec_type') == 'video':
+                                clip['resolution'] = f"{s.get('width', '?')}x{s.get('height', '?')}"
+                                break
+                        dur = float(info.get('format', {}).get('duration', 0))
+                        if dur:
+                            clip['duration'] = _format_duration_seconds(dur)
+                    except Exception:
+                        pass
+                db.save_clip(clip)
+                db.update_local_path(clip_id, fpath, 'done')
+                imported += 1
+            return str(imported)
+
+        w = BackgroundWorker(_run)
+        w.result_signal.connect(lambda count: (
+            self._do_search(),
+            self._toast(f"Watch folder: imported {count} new clip(s)", 'success', 3000)
+        ) if count and int(count) > 0 else None)
+        self._bg_workers.append(w)
+        w.finished.connect(lambda: self._bg_workers.remove(w) if w in self._bg_workers else None)
+        w.start()
 
     def _open_path(self, path):
         """Open a file or directory in the system file manager."""
