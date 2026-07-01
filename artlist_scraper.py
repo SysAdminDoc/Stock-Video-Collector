@@ -11781,6 +11781,8 @@ class MainWindow(QMainWindow):
             ("Media player playlist  (.m3u)",     "success", self._export_m3u),
             ("Spreadsheet  (.csv -- all fields)",  "success", self._export_csv),
             ("Project handoff package  (.zip)",    "success", self._export_handoff),
+            ("Premiere / Resolve  (.xml)",        "success", self._export_premiere_xml),
+            ("Final Cut Pro  (.fcpxml)",          "success", self._export_fcpxml),
             ("Export all four formats at once",   None,      self._export_all),
         ]:
             btn = QPushButton(text)
@@ -11798,6 +11800,8 @@ class MainWindow(QMainWindow):
             ("Filtered playlist  (.m3u)",        "neutral", lambda: self._export_m3u(filtered=True)),
             ("Filtered spreadsheet  (.csv)",     "neutral", lambda: self._export_csv(filtered=True)),
             ("Filtered handoff package  (.zip)", "neutral", lambda: self._export_handoff(filtered=True)),
+            ("Filtered Premiere / Resolve  (.xml)", "neutral", lambda: self._export_premiere_xml(filtered=True)),
+            ("Filtered Final Cut Pro  (.fcpxml)", "neutral", lambda: self._export_fcpxml(filtered=True)),
         ]:
             btn = QPushButton(text)
             if obj: btn.setObjectName(obj)
@@ -12752,6 +12756,135 @@ class MainWindow(QMainWindow):
             return (
                 f"Saved handoff package ({result['clips']} clips, {result['files']} files)  ->  "
                 f"{result['archive']}")
+        w = BackgroundWorker(_run)
+        w.result_signal.connect(lambda msg: self.lbl_export_status.setText(msg))
+        w.error_signal.connect(lambda e: self.lbl_export_status.setText(f"Export error: {e}"))
+        self._bg_workers.append(w)
+        w.finished.connect(lambda: self._bg_workers.remove(w) if w in self._bg_workers else None)
+        w.start()
+
+    def _export_premiere_xml(self, filtered=False):
+        tag = "filtered " if filtered else ""
+        self.lbl_export_status.setText(f"Exporting {tag}Premiere XML...")
+        rows_snapshot = self._get_export_rows(filtered)
+        def _run():
+            if not rows_snapshot: return "No data."
+            fname = f"video-premiere-filtered-{self._ts()}.xml" if filtered else f"video-premiere-{self._ts()}.xml"
+            f = os.path.join(self._out_dir(), fname)
+            root = ET.Element('xmeml', version='5')
+            seq = ET.SubElement(root, 'sequence')
+            ET.SubElement(seq, 'name').text = f"Stock Video Collector Export"
+            ET.SubElement(seq, 'duration').text = '0'
+            rate = ET.SubElement(seq, 'rate')
+            ET.SubElement(rate, 'timebase').text = '30'
+            ET.SubElement(rate, 'ntsc').text = 'FALSE'
+            media = ET.SubElement(seq, 'media')
+            video = ET.SubElement(media, 'video')
+            track = ET.SubElement(video, 'track')
+            for i, r in enumerate(rows_snapshot):
+                keys = r.keys() if hasattr(r, 'keys') else []
+                def _g(k): return str(r[k] if k in keys and r[k] else '')
+                title = _g('title') or _g('clip_id') or f'Clip_{i}'
+                local = _g('local_path')
+                url = local if (local and os.path.isfile(local)) else _g('m3u8_url')
+                if not url: continue
+                dur_secs = 0
+                dur_str = _g('duration')
+                if dur_str and ':' in dur_str:
+                    parts = dur_str.split(':')
+                    try:
+                        if len(parts) == 2: dur_secs = int(parts[0])*60 + int(float(parts[1]))
+                        elif len(parts) == 3: dur_secs = int(parts[0])*3600 + int(parts[1])*60 + int(float(parts[2]))
+                    except ValueError: pass
+                dur_frames = max(dur_secs * 30, 1)
+                ci = ET.SubElement(track, 'clipitem', id=f'clip-{i+1}')
+                ET.SubElement(ci, 'name').text = title
+                ET.SubElement(ci, 'duration').text = str(dur_frames)
+                cr = ET.SubElement(ci, 'rate')
+                ET.SubElement(cr, 'timebase').text = '30'
+                ET.SubElement(cr, 'ntsc').text = 'FALSE'
+                ET.SubElement(ci, 'start').text = '0'
+                ET.SubElement(ci, 'end').text = str(dur_frames)
+                ET.SubElement(ci, 'in').text = '0'
+                ET.SubElement(ci, 'out').text = str(dur_frames)
+                fobj = ET.SubElement(ci, 'file', id=f'file-{i+1}')
+                ET.SubElement(fobj, 'name').text = title
+                if local and os.path.isfile(local):
+                    ET.SubElement(fobj, 'pathurl').text = Path(local).as_uri()
+                else:
+                    ET.SubElement(fobj, 'pathurl').text = url
+                media_e = ET.SubElement(fobj, 'media')
+                video_e = ET.SubElement(media_e, 'video')
+                vc = ET.SubElement(video_e, 'samplecharacteristics')
+                res = _g('resolution')
+                if res and 'x' in res:
+                    w_h = res.split('x')
+                    try:
+                        ET.SubElement(vc, 'width').text = w_h[0].strip()
+                        ET.SubElement(vc, 'height').text = w_h[1].strip()
+                    except (IndexError, ValueError): pass
+            tree = ET.ElementTree(root)
+            ET.indent(tree, space='  ')
+            tree.write(f, encoding='unicode', xml_declaration=True)
+            return f"Saved {len(rows_snapshot)} clips  ->  {f}"
+        w = BackgroundWorker(_run)
+        w.result_signal.connect(lambda msg: self.lbl_export_status.setText(msg))
+        w.error_signal.connect(lambda e: self.lbl_export_status.setText(f"Export error: {e}"))
+        self._bg_workers.append(w)
+        w.finished.connect(lambda: self._bg_workers.remove(w) if w in self._bg_workers else None)
+        w.start()
+
+    def _export_fcpxml(self, filtered=False):
+        tag = "filtered " if filtered else ""
+        self.lbl_export_status.setText(f"Exporting {tag}FCPXML...")
+        rows_snapshot = self._get_export_rows(filtered)
+        def _run():
+            if not rows_snapshot: return "No data."
+            fname = f"video-fcpxml-filtered-{self._ts()}.fcpxml" if filtered else f"video-fcpxml-{self._ts()}.fcpxml"
+            f = os.path.join(self._out_dir(), fname)
+            root = ET.Element('fcpxml', version='1.9')
+            resources = ET.SubElement(root, 'resources')
+            library = ET.SubElement(root, 'library')
+            event = ET.SubElement(library, 'event', name='Stock Video Collector')
+            project = ET.SubElement(event, 'project', name='Export')
+            sequence = ET.SubElement(project, 'sequence', format='r1')
+            spine = ET.SubElement(sequence, 'spine')
+            ET.SubElement(resources, 'format', id='r1', name='FFVideoFormat1080p30',
+                          frameDuration='100/3000s', width='1920', height='1080')
+            offset_frames = 0
+            for i, r in enumerate(rows_snapshot):
+                keys = r.keys() if hasattr(r, 'keys') else []
+                def _g(k): return str(r[k] if k in keys and r[k] else '')
+                title = _g('title') or _g('clip_id') or f'Clip_{i}'
+                local = _g('local_path')
+                url = local if (local and os.path.isfile(local)) else _g('m3u8_url')
+                if not url: continue
+                dur_secs = 0
+                dur_str = _g('duration')
+                if dur_str and ':' in dur_str:
+                    parts = dur_str.split(':')
+                    try:
+                        if len(parts) == 2: dur_secs = int(parts[0])*60 + int(float(parts[1]))
+                        elif len(parts) == 3: dur_secs = int(parts[0])*3600 + int(parts[1])*60 + int(float(parts[2]))
+                    except ValueError: pass
+                dur_secs = max(dur_secs, 1)
+                dur_frac = f"{dur_secs * 3000}/3000s"
+                offset_frac = f"{offset_frames * 100}/3000s"
+                res_id = f'r{i+2}'
+                if local and os.path.isfile(local):
+                    src = Path(local).as_uri()
+                else:
+                    src = url
+                ET.SubElement(resources, 'asset', id=res_id, name=title,
+                              src=src, duration=dur_frac, format='r1')
+                clip = ET.SubElement(spine, 'asset-clip', name=title,
+                                    ref=res_id, duration=dur_frac,
+                                    offset=offset_frac, format='r1')
+                offset_frames += dur_secs * 30
+            tree = ET.ElementTree(root)
+            ET.indent(tree, space='  ')
+            tree.write(f, encoding='unicode', xml_declaration=True)
+            return f"Saved {len(rows_snapshot)} clips  ->  {f}"
         w = BackgroundWorker(_run)
         w.result_signal.connect(lambda msg: self.lbl_export_status.setText(msg))
         w.error_signal.connect(lambda e: self.lbl_export_status.setText(f"Export error: {e}"))
