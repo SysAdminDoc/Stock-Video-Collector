@@ -82,7 +82,7 @@ import secrets as _secrets
 
 APP_NAME = "Stock Video Collector"
 APP_PACKAGE_NAME = "Stock-Video-Collector"
-APP_VERSION = "0.7.28"
+APP_VERSION = "0.7.29"
 APP_WINDOW_TITLE = f"{APP_NAME}  v{APP_VERSION}"
 APP_CONFIG_DIR_NAME = "StockVideoCollector"
 LEGACY_APP_CONFIG_DIR_NAME = "ArtlistScraper"
@@ -449,6 +449,114 @@ def _safe_api_json_request(api_request):
             headers={str(k): str(v) for k, v in dict(resp.headers).items()},
             data=data if isinstance(data, dict) else {},
         )
+
+
+def _cfg_bool(cfg, key, default=False):
+    value = (cfg or {}).get(key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value or '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _bounded_int(value, default, minimum, maximum):
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = default
+    return max(minimum, min(parsed, maximum))
+
+
+def _default_proxy_pool_path():
+    return os.path.join(get_config_dir(), 'proxies.txt')
+
+
+def _normalise_proxy_entry(line):
+    raw = str(line or '').strip()
+    if not raw or raw.startswith('#'):
+        return None
+    if '#' in raw:
+        raw = raw.split('#', 1)[0].strip()
+    if not raw:
+        return None
+    candidate = raw if '://' in raw else f'http://{raw}'
+    parsed = urlparse(candidate)
+    scheme = (parsed.scheme or 'http').lower()
+    if scheme not in ('http', 'https', 'socks4', 'socks5'):
+        return None
+    host = parsed.hostname
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    if not host or not port:
+        return None
+    host_part = f'[{host}]' if ':' in host and not host.startswith('[') else host
+    proxy = {'server': f'{scheme}://{host_part}:{port}'}
+    if parsed.username:
+        proxy['username'] = unquote(parsed.username)
+    if parsed.password:
+        proxy['password'] = unquote(parsed.password)
+    return proxy
+
+
+def _load_proxy_pool(path):
+    proxy_path = os.path.expandvars(os.path.expanduser(str(path or _default_proxy_pool_path())))
+    if not os.path.isfile(proxy_path):
+        return []
+    proxies = []
+    try:
+        with open(proxy_path, encoding='utf-8') as fh:
+            for line in fh:
+                proxy = _normalise_proxy_entry(line)
+                if proxy:
+                    proxies.append(proxy)
+    except Exception:
+        return []
+    return proxies
+
+
+def _proxy_for_log(proxy):
+    if not proxy:
+        return ''
+    server = str(proxy.get('server') or '')
+    username = str(proxy.get('username') or '')
+    if username:
+        return _redact_text(f"{server} user={username}")
+    return _redact_text(server)
+
+
+def _select_proxy_from_pool(cfg, session_key=''):
+    if not _cfg_bool(cfg, 'proxy_pool_enabled', False):
+        return None, 0
+    proxies = _load_proxy_pool((cfg or {}).get('proxy_pool_path') or _default_proxy_pool_path())
+    if not proxies:
+        return None, 0
+    key = str(session_key or random.random()).encode('utf-8')
+    idx = int(hashlib.sha1(key).hexdigest(), 16) % len(proxies)
+    return dict(proxies[idx]), len(proxies)
+
+
+def _browser_profile_context(cfg, session_key=''):
+    rotate = _cfg_bool(cfg, 'rotate_browser_profiles', False)
+    slots = _bounded_int((cfg or {}).get('browser_profile_slots'), 4, 1, 50)
+    if not rotate:
+        return {
+            'profile_dir': os.path.join(get_config_dir(), 'browser_profile'),
+            'slot': 0,
+            'slots': 1,
+            'rotating': False,
+        }
+    key = str(session_key or random.random()).encode('utf-8')
+    slot = int(hashlib.sha1(key).hexdigest(), 16) % slots
+    return {
+        'profile_dir': os.path.join(get_config_dir(), 'browser_profiles', f'slot-{slot + 1:02d}'),
+        'slot': slot + 1,
+        'slots': slots,
+        'rotating': True,
+    }
+
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -3201,6 +3309,10 @@ class CrawlerWorker(QThread):
         self._pause  = threading.Event()
         self._video_re = self.profile.get_combined_video_re()
         self._batch_size = cfg.get('batch_size', 50)
+        self._browser_session_key = (
+            f"{datetime.now().isoformat()}|{random.random()}|"
+            f"{','.join(p.name for p in self._profiles)}"
+        )
 
     def _api_start_url_for_profile(self, profile):
         if len(self._profiles) == 1:
@@ -3618,9 +3730,22 @@ class CrawlerWorker(QThread):
         headless = self.cfg.get('headless', True)
         self.log(f"Launching Chromium ({'headless' if headless else 'visible'})...", "INFO")
 
-        # Session persistence: reuse browser profile for cookies/localStorage
-        profile_dir = os.path.join(get_config_dir(), 'browser_profile')
+        # Session persistence: reuse or rotate browser profiles for cookies/localStorage
+        browser_profile = _browser_profile_context(self.cfg, self._browser_session_key)
+        profile_dir = browser_profile['profile_dir']
         os.makedirs(profile_dir, exist_ok=True)
+        if browser_profile['rotating']:
+            self.log(
+                f"Browser profile rotation: slot {browser_profile['slot']}/{browser_profile['slots']} ({profile_dir})",
+                "INFO")
+        else:
+            self.log(f"Browser profile: {profile_dir}", "INFO")
+
+        proxy, proxy_count = _select_proxy_from_pool(self.cfg, self._browser_session_key)
+        if proxy:
+            self.log(f"Proxy pool: selected {_proxy_for_log(proxy)} from {proxy_count} entries", "INFO")
+        elif _cfg_bool(self.cfg, 'proxy_pool_enabled', False):
+            self.log("Proxy pool enabled but no valid proxies were loaded.", "WARN")
 
         # Rotate through recent UA strings
         ua_versions = ['131.0.0.0', '130.0.0.0', '129.0.0.0', '128.0.0.0']
@@ -3628,10 +3753,9 @@ class CrawlerWorker(QThread):
         ua = f'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{ua_ver} Safari/537.36'
 
         async with async_playwright() as pw:
-            context = await pw.chromium.launch_persistent_context(
-                profile_dir,
-                headless=headless,
-                args=[
+            launch_kwargs = {
+                'headless': headless,
+                'args': [
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
                     '--disable-blink-features=AutomationControlled',
@@ -3639,19 +3763,22 @@ class CrawlerWorker(QThread):
                     '--disable-dev-shm-usage',
                     f'--window-size=1440,900',
                 ],
-                viewport={'width': 1440, 'height': 900},
-                user_agent=ua,
-                locale='en-US',
-                timezone_id='America/New_York',
-                extra_http_headers={
+                'viewport': {'width': 1440, 'height': 900},
+                'user_agent': ua,
+                'locale': 'en-US',
+                'timezone_id': 'America/New_York',
+                'extra_http_headers': {
                     'Accept-Language': 'en-US,en;q=0.9',
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
                     'sec-ch-ua': f'"Chromium";v="{ua_ver.split(".")[0]}", "Google Chrome";v="{ua_ver.split(".")[0]}", "Not?A_Brand";v="99"',
                     'sec-ch-ua-mobile': '?0',
                     'sec-ch-ua-platform': '"Windows"',
                 },
-                ignore_default_args=['--enable-automation'],
-            )
+                'ignore_default_args': ['--enable-automation'],
+            }
+            if proxy:
+                launch_kwargs['proxy'] = proxy
+            context = await pw.chromium.launch_persistent_context(profile_dir, **launch_kwargs)
 
             # Inject stealth patches into every new page/frame
             await context.add_init_script(self.STEALTH_SCRIPT)
@@ -5085,6 +5212,7 @@ class DirectScrapeWorker(QThread):
         self.mode  = mode
         self._stop = threading.Event()
         self._db_lock = threading.Lock()  # Thread-safe DB access for concurrent mode
+        self._browser_session_key = f"{mode}|{datetime.now().isoformat()}|{random.random()}"
 
     def stop(self): self._stop.set()
 
@@ -5192,12 +5320,20 @@ class DirectScrapeWorker(QThread):
 
         self.log("=== API DISCOVERY MODE ===", "OK")
         self.log("Launching browser to capture Artlist's internal API endpoints...", "INFO")
+        proxy, proxy_count = _select_proxy_from_pool(self.cfg, self._browser_session_key)
+        if proxy:
+            self.log(f"Proxy pool: selected {_proxy_for_log(proxy)} from {proxy_count} entries", "INFO")
+        elif _cfg_bool(self.cfg, 'proxy_pool_enabled', False):
+            self.log("Proxy pool enabled but no valid proxies were loaded.", "WARN")
 
         discovered = {}  # url_pattern -> {method, content_type, sample_keys, count}
         clip_data_endpoints = []  # endpoints that returned clip-like data
 
         async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=True)
+            launch_kwargs = {'headless': True}
+            if proxy:
+                launch_kwargs['proxy'] = proxy
+            browser = await pw.chromium.launch(**launch_kwargs)
             context = await browser.new_context(
                 user_agent=self.HEADERS['User-Agent'],
                 viewport={'width': 1440, 'height': 900},
@@ -5660,7 +5796,15 @@ class DirectScrapeWorker(QThread):
                 self.log("  Chromium not installed — skipping bootstrap.", "WARN")
                 self.log("  Install browser, then re-run; or use 'API Discovery' mode first.", "WARN")
                 return '', api_urls, clips
-            browser = await pw.chromium.launch(headless=True)
+            proxy, proxy_count = _select_proxy_from_pool(self.cfg, self._browser_session_key + '|bootstrap')
+            if proxy:
+                self.log(f"  Proxy pool: selected {_proxy_for_log(proxy)} from {proxy_count} entries", "INFO")
+            elif _cfg_bool(self.cfg, 'proxy_pool_enabled', False):
+                self.log("  Proxy pool enabled but no valid proxies were loaded.", "WARN")
+            launch_kwargs = {'headless': True}
+            if proxy:
+                launch_kwargs['proxy'] = proxy
+            browser = await pw.chromium.launch(**launch_kwargs)
             context = await browser.new_context(
                 user_agent=self.HEADERS['User-Agent'],
                 viewport={'width': 1440, 'height': 900},
@@ -9030,6 +9174,10 @@ class MainWindow(QMainWindow):
             'chk_headless': ("Headless mode", "Run the browser without a visible window"),
             'chk_resume': ("Resume mode", "Skip pages already marked crawled"),
             'chk_crawl_trace': ("Save failed-crawl diagnostics", "Save redacted trace bundles when browser crawls fail"),
+            'chk_rotate_browser_profiles': ("Rotate browser profile slots", "Rotates Playwright persistent profile directories between crawl sessions"),
+            'spin_browser_profile_slots': ("Browser profile slot count", "Number of persistent browser profile slots available for rotation"),
+            'chk_proxy_pool': ("Use proxy pool", "Routes Playwright browser launches through one proxy from the configured proxy pool"),
+            'inp_proxy_pool_path': ("Proxy pool file", "Path to a proxies.txt file with one proxy per line"),
             'inp_output': ("Output directory", "Base folder for exports, thumbnails, and default downloads"),
             'combo_crawl_mode': ("Crawl mode", "Chooses full crawl, catalog sweep, M3U8 harvest, API discovery, direct HTTP, yt-dlp, or RSS/Atom feed ingest"),
             'progress_bar': ("Crawl progress", "Shows active crawl progress while indeterminate or running"),
@@ -9128,6 +9276,7 @@ class MainWindow(QMainWindow):
     def _apply_focus_order(self):
         order = [
             'inp_url', 'combo_crawl_mode', 'btn_start', 'btn_pause', 'btn_stop',
+            'chk_rotate_browser_profiles', 'spin_browser_profile_slots', 'chk_proxy_pool', 'inp_proxy_pool_path',
             'inp_search', 'combo_sort', 'combo_duration', 'combo_user_collection',
             'btn_catalog', 'btn_select_visible', 'btn_clear_selection',
             'btn_backup_catalog', 'btn_backup_refresh', 'btn_backup_restore_selected',
@@ -9261,6 +9410,38 @@ class MainWindow(QMainWindow):
         g4.addWidget(self.chk_headless); g4.addSpacing(Z(30)); g4.addWidget(self.chk_resume)
         g4.addSpacing(Z(30)); g4.addWidget(self.chk_crawl_trace); g4.addStretch()
         lay.addWidget(grp4)
+
+        # Browser identity / proxy rotation
+        grp_proxy = QGroupBox("Browser Identity Rotation"); gp2 = QVBoxLayout(grp_proxy)
+        row_profile = QHBoxLayout()
+        self.chk_rotate_browser_profiles = QCheckBox("Rotate persistent browser profile slots")
+        self.chk_rotate_browser_profiles.setToolTip("Use browser_profiles/slot-N directories so cookies/localStorage rotate between crawl sessions.")
+        row_profile.addWidget(self.chk_rotate_browser_profiles)
+        row_profile.addSpacing(Z(18))
+        row_profile.addWidget(QLabel("Slots:"))
+        self.spin_browser_profile_slots = QSpinBox()
+        self.spin_browser_profile_slots.setRange(1, 50)
+        self.spin_browser_profile_slots.setValue(4)
+        self.spin_browser_profile_slots.setFixedWidth(Z(80))
+        row_profile.addWidget(self.spin_browser_profile_slots)
+        row_profile.addStretch()
+        gp2.addLayout(row_profile)
+
+        row_proxy = QHBoxLayout()
+        self.chk_proxy_pool = QCheckBox("Use proxy pool")
+        self.chk_proxy_pool.setToolTip("Load one proxy per line from proxies.txt; supports http, https, socks4, and socks5 URLs.")
+        row_proxy.addWidget(self.chk_proxy_pool)
+        self.inp_proxy_pool_path = QLineEdit(_default_proxy_pool_path())
+        self.inp_proxy_pool_path.setPlaceholderText("Path to proxies.txt")
+        row_proxy.addWidget(self.inp_proxy_pool_path, 1)
+        btn_proxy = QPushButton("Browse...")
+        btn_proxy.setObjectName("neutral")
+        btn_proxy.setFixedWidth(Z(90))
+        btn_proxy.clicked.connect(self._browse_proxy_pool)
+        row_proxy.addWidget(btn_proxy)
+        gp2.addLayout(row_proxy)
+        gp2.addWidget(self._sub("Proxy lines may be host:port, http://user:pass@host:port, or socks5://host:port. Credentials are never logged."))
+        lay.addWidget(grp_proxy)
 
         # Output dir
         grp5 = QGroupBox("Output Directory"); g5 = QHBoxLayout(grp5)
@@ -10963,6 +11144,12 @@ class MainWindow(QMainWindow):
             cfg['ui_zoom'] = self._zoom_combo.currentData() or 1.0
         if hasattr(self, 'spin_backup_retention'):
             cfg['backup_retention_count'] = self.spin_backup_retention.value()
+        if hasattr(self, 'chk_rotate_browser_profiles'):
+            cfg['rotate_browser_profiles'] = self.chk_rotate_browser_profiles.isChecked()
+            cfg['browser_profile_slots'] = self.spin_browser_profile_slots.value()
+        if hasattr(self, 'chk_proxy_pool'):
+            cfg['proxy_pool_enabled'] = self.chk_proxy_pool.isChecked()
+            cfg['proxy_pool_path'] = self.inp_proxy_pool_path.text().strip()
         return cfg
 
     # ── Browser management ──────────────────────────────────────────────────
@@ -12170,6 +12357,13 @@ class MainWindow(QMainWindow):
             self.spin_bw_limit.setValue(cfg['bw_limit'])
         if 'backup_retention_count' in cfg and hasattr(self, 'spin_backup_retention'):
             self.spin_backup_retention.setValue(max(1, min(500, int(cfg['backup_retention_count']))))
+        if hasattr(self, 'chk_rotate_browser_profiles'):
+            self.chk_rotate_browser_profiles.setChecked(_cfg_bool(cfg, 'rotate_browser_profiles', False))
+            if 'browser_profile_slots' in cfg:
+                self.spin_browser_profile_slots.setValue(_bounded_int(cfg.get('browser_profile_slots'), 4, 1, 50))
+        if hasattr(self, 'chk_proxy_pool'):
+            self.chk_proxy_pool.setChecked(_cfg_bool(cfg, 'proxy_pool_enabled', False))
+            self.inp_proxy_pool_path.setText(str(cfg.get('proxy_pool_path') or _default_proxy_pool_path()))
         # Clipboard monitor (opt-in)
         if cfg.get('clipboard_monitor', False) and hasattr(self, '_clipboard_timer'):
             if not self._clipboard_timer.isActive():
@@ -12193,6 +12387,12 @@ class MainWindow(QMainWindow):
     def _browse_output(self):
         d = QFileDialog.getExistingDirectory(self,"Select Output Dir",self.inp_output.text())
         if d: self.inp_output.setText(d)
+
+    def _browse_proxy_pool(self):
+        start = self.inp_proxy_pool_path.text().strip() if hasattr(self, 'inp_proxy_pool_path') else _default_proxy_pool_path()
+        path, _ = QFileDialog.getOpenFileName(self, "Select proxies.txt", os.path.dirname(start), "Text Files (*.txt);;All Files (*)")
+        if path:
+            self.inp_proxy_pool_path.setText(path)
 
     def _db_backup_dir(self):
         return os.path.join(get_config_dir(), 'backups')

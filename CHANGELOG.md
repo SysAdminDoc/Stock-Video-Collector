@@ -2,6 +2,11 @@
 
 All notable changes to Stock-Video-Collector will be documented in this file.
 
+## [v0.7.29] - 2026-07-01
+
+- Added: Optional Playwright persistent-context rotation across `browser_profiles/slot-N` directories.
+- Added: Optional `proxies.txt` pool for Playwright browser launches, with parsed HTTP(S)/SOCKS proxy entries and redacted logging.
+
 ## [v0.7.28] - 2026-07-01
 
 - Added: Browser-free RSS/Atom feed ingest mode for video enclosures and `media:content` entries, using the shared unsafe-URL protection before fetching feeds.
